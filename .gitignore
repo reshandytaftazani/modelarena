@@ -1,0 +1,75 @@
+# Local planning documents (preserve local copies)
+/START_HERE.md
+/docs/ARCHITECTURE.md
+/docs/IMPLEMENTATION_PLAN.md
+
+# Secrets and machine-specific environment settings
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches and generated packaging
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Frontend dependencies and build/test output
+node_modules/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Private runtime storage, datasets and generated experiment output
+# Keep test fixtures, source modules and experiments/configs trackable.
+/data/
+/datasets/
+/uploads/
+/artifacts/
+/models/
+/checkpoints/
+/reports/
+/generated/
+/runtime/
+/.modelarena/
+/experiments/reports/
+mlruns/
+mlartifacts/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+*.log
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
