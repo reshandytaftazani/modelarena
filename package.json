@@ -1,0 +1,8 @@
+{
+  "name": "modelarena-toolchain",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Toolchain pins only; the frontend is scheduled for Day 22.",
+  "engines": { "node": "24.19.0", "npm": "12.2.0" },
+  "packageManager": "npm@12.2.0"
+}

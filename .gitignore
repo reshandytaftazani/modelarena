@@ -28,6 +28,7 @@ __pycache__/
 .coverage.*
 htmlcov/
 *.egg-info/
+.sdd-workspace/
 
 # Frontend dependencies and build/test output
 node_modules/
