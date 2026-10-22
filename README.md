@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 1 setup](https://img.shields.io/badge/status-day_1_setup-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 2 data foundation](https://img.shields.io/badge/status-day_2_data_foundation-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 1 setup implemented:** Locked dependencies, immutable validated settings, hardware inventory, and setup tests are available. The dashboard, API server, training workflows, and benchmarks remain planned.
+> **Day 2 verified locally:** Bounded CSV parsing, deterministic fingerprints, and an initial training-only Dummy resource probe are available alongside the Day 1 setup. The dashboard, API server, production training workflows, and full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -82,12 +82,13 @@ Verified delivery as of **2026-10-23**:
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
 | Day 1 environment, settings and inventory | Committed | 59 tests passed, zero skips; `2dc1dc7`, `f989c16`, `de54447`; see [validation evidence](docs/VALIDATION.md#day-1-commit-verification--2026-10-23) |
-| G1 — Data correctness | In progress; gate not passed | Day 1 setup complete; Days 2–7 pending |
+| Day 2 CSV parsing and initial resource probe | Committed | 103 tests passed, zero skips; `6270779`, `44be1cb`; actual four-thread probe and staged commit verification recorded in [validation evidence](docs/VALIDATION.md#day-2--2026-10-23) |
+| G1 — Data correctness | In progress; gate not passed | Days 1–2 complete; Days 3–7 pending |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-One setup session is complete; **0/4 milestone gates have passed**. Setup tests establish configuration and inventory behavior; ML correctness, runtime resource enforcement and application usability require later acceptance checks.
+Two daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, structural parsing, and initial instrumentation; the complete leakage-safe ML pipeline, worker resource enforcement, and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
@@ -130,3 +131,15 @@ The root npm manifest locks the toolchain only; no frontend exists yet. `npm --p
 Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The 4 GiB child RSS cap and other policy-v1 settings are configuration contracts; worker enforcement and performance validation arrive in later tasks.
 
 Read the [project specification](docs/PROJECT_SPEC.md) for detailed requirements, evaluation rules, and the definition of done.
+
+### Initial resource probe
+
+```powershell
+uv run --locked python -m scripts.benchmark --stage initial --threads 4
+```
+
+Run this command as a fresh process. It uses the bundled Breast Cancer dataset, reserves 20% without scoring it, parses only the remaining 455 rows, and runs serial five-fold Dummy CV. The report records seeds, row-identity hashes, parser hashes, actual thread pools, package/lock identity, and sampled process RSS/CPU/system free memory. Generated JSON stays under application home in `benchmarks/`; scratch CSV files are removed. The command refuses a second initial probe while its lock exists. After an interrupted process, verify it has exited before manually removing a stale `initial.lock`.
+
+Parser policy v1 accepts UTF-8/BOM comma CSV and preserves string values, including empty cells, whitespace, and numeric spellings. It rejects malformed records, duplicate/blank headers, unsafe paths, and exceeded byte/row/column/cell/memory bounds. The canonical SHA-256 includes ordered headers and records while ignoring BOM, equivalent quoting, and line-ending style. Target validation and analytical profiles arrive on Day 3.
+
+This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Worker termination, API responsiveness, and the full 2/4/6-thread comparison remain later acceptance tasks.
