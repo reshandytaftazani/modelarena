@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Planning](https://img.shields.io/badge/status-planning-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 1 setup](https://img.shields.io/badge/status-day_1_setup-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Planning stage:** This repository currently contains documentation only. Application code, tests, training workflows, and benchmarks have not been implemented or run. All capabilities below are planned.
+> **Day 1 setup implemented:** Locked dependencies, immutable validated settings, hardware inventory, and setup tests are available. The dashboard, API server, training workflows, and benchmarks remain planned.
 
 ## Why ModelArena
 
@@ -73,9 +73,21 @@ Uploads, databases, models, and reports will live in private local storage outsi
 | Verification | pytest, httpx, Playwright browser checks |
 | Dependency management | uv with a Python lockfile; npm with a frontend lockfile |
 
-Versions and CPU-wheel compatibility will be verified during setup.
+The Windows Python environment and CPU-only torch wheel have passed the Day 1 smoke check. See [validation evidence](docs/VALIDATION.md) for versions and limits of that verification. Frontend dependency locking is scheduled for Day 22.
 
 ## Development roadmap
+
+Verified delivery as of **2026-10-23**:
+
+| Work package | Delivery state | Verification / commit evidence |
+|---|---|---|
+| Day 1 environment, settings and inventory | Committed | 59 tests passed, zero skips; `2dc1dc7`, `f989c16`, `de54447`; see [validation evidence](docs/VALIDATION.md#day-1-commit-verification--2026-10-23) |
+| G1 — Data correctness | In progress; gate not passed | Day 1 setup complete; Days 2–7 pending |
+| G2 — Classical experiments | Not started | Acceptance pending |
+| G3 — MLP and resource evidence | Not started | Acceptance pending |
+| G4 — Usable local release | Not started | Acceptance pending |
+
+One setup session is complete; **0/4 milestone gates have passed**. Setup tests establish configuration and inventory behavior; ML correctness, runtime resource enforcement and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
@@ -102,6 +114,19 @@ The design targets CPU laptops with roughly 8–16 GB RAM, one active job, and b
 
 ## Installation and usage
 
-There is no runnable application or dependency manifest to install yet. Setup and usage commands will be added after implementation and verification on Windows.
+Day 1 developer setup was verified on Windows PowerShell with Python 3.12.15, uv 0.13.5, Node 24.19.0, and npm 12.2.0. Install uv using its [official instructions](https://docs.astral.sh/uv/getting-started/installation/). If it is installed outside PATH, use `& "$env:USERPROFILE/.local/bin/uv.exe"` in place of `uv` in the commands below. Shell activation is unnecessary.
+
+```powershell
+uv python install 3.12.15
+uv sync --locked
+uv run --locked python -c "import fastapi, sklearn, torch, mlflow; print(torch.__version__); assert torch.version.cuda is None"
+uv run --locked pytest -q
+uv run --locked python -m scripts.profile_hardware
+npm.cmd ci --ignore-scripts
+```
+
+The root npm manifest locks the toolchain only; no frontend exists yet. `npm --prefix apps/web ci` becomes applicable on Day 22. Python dependencies use exact direct pins and the transitive `uv.lock`; torch comes from the explicit [CPU wheel index](https://docs.astral.sh/uv/guides/integration/pytorch/).
+
+Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The 4 GiB child RSS cap and other policy-v1 settings are configuration contracts; worker enforcement and performance validation arrive in later tasks.
 
 Read the [project specification](docs/PROJECT_SPEC.md) for detailed requirements, evaluation rules, and the definition of done.
