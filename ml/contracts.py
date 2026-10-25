@@ -9,6 +9,165 @@ class TaskType(StrEnum):
     REGRESSION = "regression"
 
 
+class FeatureType(StrEnum):
+    NUMERIC = "numeric"
+    CATEGORICAL = "categorical"
+    BOOLEAN = "boolean"
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureColumn:
+    name: str
+    dtype: FeatureType
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("Feature name must be nonempty")
+        if not isinstance(self.dtype, FeatureType):
+            raise ValueError("Feature type must be explicitly declared")
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureSchema:
+    """Ordered declared types, never inferred from the complete dataset."""
+
+    columns: tuple[FeatureColumn, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.columns, tuple) or not self.columns:
+            raise ValueError("Select at least one feature")
+        if any(not isinstance(c, FeatureColumn) for c in self.columns):
+            raise ValueError("Invalid feature declaration")
+        if len({c.name for c in self.columns}) != len(self.columns):
+            raise ValueError("Feature names must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetConfig:
+    task: TaskType
+    target: str
+    features: FeatureSchema
+    positive_label: str | None = None
+    acknowledge_duplicates: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, TaskType) or not isinstance(self.features, FeatureSchema):
+            raise ValueError("Explicit task and feature schema required")
+        if not isinstance(self.target, str) or not self.target.strip():
+            raise ValueError("Target name must be nonempty")
+        if self.target in {c.name for c in self.features.columns}:
+            raise ValueError("Target cannot also be a feature")
+        if type(self.acknowledge_duplicates) is not bool:
+            raise ValueError("Duplicate acknowledgement must be boolean")
+        if self.task == TaskType.BINARY_CLASSIFICATION:
+            if not isinstance(self.positive_label, str) or not self.positive_label.strip():
+                raise ValueError("Explicit positive label required")
+        elif self.positive_label is not None:
+            raise ValueError("Regression does not have a positive label")
+
+
+FeatureValue = float | str | bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredDataset:
+    """Private validated records; not an analytical response or profile input."""
+
+    config: DatasetConfig
+    rows: tuple[tuple[FeatureValue, ...], ...] = field(repr=False)
+    targets: tuple[int | float, ...] = field(repr=False)
+    label_mapping: tuple[tuple[str, int], ...]
+    excluded_columns: tuple[str, ...]
+    canonical_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingView:
+    """Only selected training records; no parent dataset or holdout reference.
+
+    Internal trusted boundary. Day 4 will supply persisted training indices;
+    arbitrary client indices must never be accepted by a transport endpoint.
+    """
+
+    config: DatasetConfig
+    row_ids: tuple[int, ...] = field(repr=False)
+    rows: tuple[tuple[FeatureValue, ...], ...] = field(repr=False)
+    targets: tuple[int | float, ...] = field(repr=False)
+    label_mapping: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, DatasetConfig):
+            raise ValueError("Training view requires a dataset configuration")
+        if not all(isinstance(v, tuple) for v in (self.row_ids, self.rows, self.targets, self.label_mapping)):
+            raise ValueError("Training records must be immutable tuples")
+        if not self.rows or len(self.rows) != len(self.targets) or len(self.rows) != len(self.row_ids):
+            raise ValueError("Training records and identities must align and be nonempty")
+        if any(type(i) is not int or i < 0 for i in self.row_ids) or len(set(self.row_ids)) != len(self.row_ids):
+            raise ValueError("Training identities must be unique nonnegative integers")
+        if any(not isinstance(row, tuple) or len(row) != len(self.config.features.columns) for row in self.rows):
+            raise ValueError("Training records must match the feature schema")
+
+
+@dataclass(frozen=True, slots=True)
+class NumericSummary:
+    count: int
+    mean: float | None
+    std: float | None
+    minimum: float | None
+    maximum: float | None
+    quantiles: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureProfile:
+    name: str
+    dtype: FeatureType
+    missing_count: int
+    missing_fraction: float
+    distinct_count: int
+    numeric: NumericSummary | None
+    top_counts: tuple[tuple[str | bool, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TargetProfile:
+    task: TaskType
+    class_counts: tuple[tuple[int, int], ...]
+    minority_ratio: float | None
+    numeric: NumericSummary | None
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateCounts:
+    """Extra rows exclude the first occurrence; groups count repeated keys."""
+
+    feature_groups: int
+    feature_extra_rows: int
+    full_row_groups: int
+    full_row_extra_rows: int
+    conflicting_label_groups: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileWarning:
+    code: str
+    message: str
+    feature: str | None = None
+    heuristic: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetProfile:
+    partition: str
+    row_count: int
+    feature_count: int
+    features: tuple[FeatureProfile, ...]
+    target: TargetProfile
+    duplicates: DuplicateCounts
+    warnings: tuple[ProfileWarning, ...]
+    warnings_truncated: bool
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceLimits:
     """Policy v1 ceilings; lower caps are allowed, increases require policy review.
