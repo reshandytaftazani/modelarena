@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 2 data foundation](https://img.shields.io/badge/status-day_2_data_foundation-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 3 data validation](https://img.shields.io/badge/status-day_3_data_validation-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 2 verified locally:** Bounded CSV parsing, deterministic fingerprints, and an initial training-only Dummy resource probe are available alongside the Day 1 setup. The dashboard, API server, production training workflows, and full benchmark comparison remain planned.
+> **Day 3 verified locally:** Explicit task, label and feature validation, duplicate acknowledgement, and training-only profiles extend the Day 2 parser and resource probe. The dashboard, API server, persisted splits, production training workflows, and full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -77,13 +77,14 @@ The Windows Python environment and CPU-only torch wheel have passed the Day 1 sm
 
 ## Development roadmap
 
-Verified delivery as of **2026-10-23**:
+Verified delivery as of **2026-10-26**:
 
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
 | Day 1 environment, settings and inventory | Committed | 59 tests passed, zero skips; `2dc1dc7`, `f989c16`, `de54447`; see [validation evidence](docs/VALIDATION.md#day-1-commit-verification--2026-10-23) |
 | Day 2 CSV parsing and initial resource probe | Committed | 103 tests passed, zero skips; `6270779`, `44be1cb`; actual four-thread probe and staged commit verification recorded in [validation evidence](docs/VALIDATION.md#day-2--2026-10-23) |
-| G1 — Data correctness | In progress; gate not passed | Days 1–2 complete; Days 3–7 pending |
+| Day 3 task validation and training profiles | Committed | 150 tests passed, zero skips; `d58159f`; see [validation evidence](docs/VALIDATION.md#day-3--2026-10-26) |
+| G1 — Data correctness | In progress; gate not passed | Days 1–3 complete; Days 4–7 pending |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
@@ -140,6 +141,12 @@ uv run --locked python -m scripts.benchmark --stage initial --threads 4
 
 Run this command as a fresh process. It uses the bundled Breast Cancer dataset, reserves 20% without scoring it, parses only the remaining 455 rows, and runs serial five-fold Dummy CV. The report records seeds, row-identity hashes, parser hashes, actual thread pools, package/lock identity, and sampled process RSS/CPU/system free memory. Generated JSON stays under application home in `benchmarks/`; scratch CSV files are removed. The command refuses a second initial probe while its lock exists. After an interrupted process, verify it has exited before manually removing a stale `initial.lock`.
 
-Parser policy v1 accepts UTF-8/BOM comma CSV and preserves string values, including empty cells, whitespace, and numeric spellings. It rejects malformed records, duplicate/blank headers, unsafe paths, and exceeded byte/row/column/cell/memory bounds. The canonical SHA-256 includes ordered headers and records while ignoring BOM, equivalent quoting, and line-ending style. Target validation and analytical profiles arrive on Day 3.
+Parser policy v1 accepts UTF-8/BOM comma CSV and preserves string values, including empty cells, whitespace, and numeric spellings. It rejects malformed records, duplicate/blank headers, unsafe paths, and exceeded byte/row/column/cell/memory bounds. The canonical SHA-256 includes ordered headers and records while ignoring BOM, equivalent quoting, and line-ending style.
+
+Day 3 adds `configure_dataset(parsed, config)` with frozen `DatasetConfig` and ordered `FeatureSchema` declarations. Binary classification requires an explicit positive label, mapped to 1; the other label maps to 0. Regression requires finite, variable numeric targets. Selected features declare numeric, categorical or boolean types; no full-data type inference occurs. Empty/whitespace-only cells are missing, other categorical spellings remain literal, and nonfinite numeric inputs are rejected. Boolean features accept true/false or 1/0, case insensitive.
+
+Repeated selected, typed features require explicit acknowledgement, including complete repeats and differing labels. No rows are removed. Numeric spellings such as `1` and `1.0` compare equally for this gate. Detailed duplicate counts are exposed only through `profile_training(view)`, together with training dimensions, missingness, population standard deviation, linear quartiles, target distribution and heuristic warnings. Category top counts are capped at five per feature and warnings at twenty, with a truncation flag. Review ID-like and post-outcome features before experiments; Bank pre-call prediction requires excluding `duration`.
+
+The internal `training_view(configured, row_ids)` copies only trusted training rows and retains no parent dataset reference. It does not establish split provenance: persisted, disjoint partitions and feasibility checks belong to Day 4. Do not expose this helper to arbitrary client indices or use profiles to fit preprocessing. Grouped/temporal evaluation remains unsupported, and duplicate acknowledgement does not establish row independence.
 
 This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Worker termination, API responsiveness, and the full 2/4/6-thread comparison remain later acceptance tasks.
