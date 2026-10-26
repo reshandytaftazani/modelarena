@@ -1,6 +1,6 @@
 # Experiment protocol
 
-This document describes the implemented data and partition boundaries through Day 4. Model fitting, preprocessing, durable evaluation-scope locks, worker lifecycle and final evaluation remain later work. The local split manifest is an integrity record, not a completed experiment.
+This document describes the implemented data, partition and preprocessing boundaries through Day 5. Candidate model fitting, durable evaluation-scope locks, worker lifecycle and final evaluation remain later work. The local split manifest is an integrity record, not a completed experiment.
 
 ## Configure before splitting
 
@@ -47,7 +47,7 @@ Persisted indices are authoritative on reload; do not regenerate them with a dif
 
 Split storage does not yet implement the durable dataset-content/target/task evaluation-scope lock. Later repository and finalization work must look up and reuse the original split for that scope. Feature subsets, positive-label changes, primary metric changes and model seeds must not create a new holdout opportunity. `create_split` is a trusted creation function, not a client endpoint for repeated reseeding. Never overwrite a frozen split or present changed data as the same identity.
 
-Day 5 must fit preprocessing inside each appropriate fitting partition, with explicit all-missing-column and allocation policies. MLP preprocessing and gradient updates use inner fitting rows only; early stopping uses inner validation, and scoring uses outer validation. Classical candidates use the same outer validation folds. Training-only profile statistics must never fit preprocessing.
+Preprocessing must fit inside each appropriate fitting partition, with explicit all-missing-column and allocation policies. MLP preprocessing and gradient updates use inner fitting rows only; early stopping uses inner validation, and scoring uses outer validation. Classical candidates use the same outer validation folds. Training-only profile statistics must never fit preprocessing.
 
 Before experiments, freeze the task's primary CV metric and binary positive label. Rank by training-portion CV only. Later finalization freezes the selected model, refits on the full training partition, and evaluates once on the locked holdout with a durable audit trail. No holdout evaluation, model fitting or release milestone is claimed by Day 4.
 
@@ -62,3 +62,14 @@ git diff --check
 ```
 
 See [validation evidence](VALIDATION.md) for executed results and known limitations. Generated manifests and dataset artifacts remain private runtime files, excluded from Git.
+
+
+## Day 5 preprocessing boundary
+
+`FoldPreprocessor.fit_transform(fit_view)` fits a fresh `ColumnTransformer` on an isolated fitting `TrainingView`; `transform(validation_view)` reuses that fit without learning statistics or categories. Construct fitting/validation views from persisted fold identities with matching configurations. The wrapper records fitting row IDs and retains no parent dataset or targets. A refit invalidates fitted state before starting. Trusted callers own partition provenance; the wrapper does not verify it. `make_preprocessor(schema)` is the unfitted factory; model code must consume the guarded wrapper output.
+
+Numeric columns use median imputation, retaining all-missing columns with zero, followed by StandardScaler. Constant numeric columns become zero. Categorical and boolean columns use constant missing imputation and one-hot encoding with unknown categories ignored. User categories receive a namespace prefix before imputation, separating literal strings from the missing sentinel. All-missing categorical columns retain one missing category. If every training feature is missing, fitting fails safely. Output order is numeric columns followed by categorical/boolean columns, preserving declared order within each group. Targets are never included.
+
+Training-only category counts include a missing category only when present. Enforce at most 100 categories per column and 2,048 total encoded features. The 512 MiB budget reserves `(fit_rows + transform_rows) * encoded_width * (8 + 8 + 4) * 3` bytes: float64 working/copy buffers, a float32 cast buffer, and a three-times safety factor. Fit admission uses `transform_rows = fit_rows`. Each later transform checks its row count against fitted width before encoder allocation. Realized width is checked after fit and matrix shape/budget after transform, before explicit sparse-to-dense conversion. Outputs are finite float64 by default; requesting float32 also checks its finite range before casting.
+
+The estimate assumes serial processing with one retained fit matrix; callers must release prior validation outputs before producing another. It is not an OS memory quota and does not cover model-specific allocations or arbitrary matrices retained by a caller. Process RSS enforcement and resource-pressure recovery remain future worker work. No candidate training, MLP integration, holdout scoring or performance benchmark is claimed by these unit checks.

@@ -171,3 +171,21 @@ The user subsequently requested committing and pushing the changes. Commit `64a8
 Before committing, the four exact paths were staged, the staged names and diff were reviewed, and `git diff --cached --check` exited 0. A fresh `git checkout-index --all` export into a new temporary directory was tested with `uv run --project <export> --directory <export> --locked pytest -q`, using the existing locked environment via `UV_PROJECT_ENVIRONMENT`: **205 passed in 31.01 s, zero skips**. This verifies the staged source independently of the unstaged README/evidence changes; it is not a fresh dependency-installation check. `uv lock --check` also exited 0. Post-commit status showed only README and this validation document pending.
 
 The following documentation commit publishes the actual code hash and verification result. Local planning documents remain ignored; runtime files, datasets and generated artifacts are excluded. Day 5 onward remains unexecuted and G1–G4 remain unpassed. Pushing this progress does not constitute a release.
+
+## Day 5 — 2026-10-26
+
+The user authorized Day 5 implementation, commit and push. Delivered a fresh preprocessing factory and guarded `FoldPreprocessor` in `ml/preprocessing/factory.py`, with owning tests in `tests/unit/test_preprocessing.py` and `tests/unit/test_resource_estimates.py`. No dependencies changed, candidate training or downloads ran. Days 6–28 remain unexecuted and G1–G4 remain unpassed.
+
+Numeric median imputation/scaling and categorical/boolean missing imputation/one-hot encoding learn only from fitting rows. Empty numeric columns remain zero; constant features and empty categorical columns keep stable finite output. Namespaced categories cannot collide with the missing sentinel. Unknown categories transform without changing fitted width. The feature matrix excludes targets. The wrapper accepts isolated views with matching configuration, records fitting row IDs and creates a fresh transformer on refit; callers remain responsible for selecting persisted fitting identities.
+
+Training-only estimates enforce policy-v1 category/width limits and the 512 MiB preprocessing budget before fit. The live-buffer estimate counts fitting and transform rows, float64 intermediates/copies, float32 cast space and a three-times safety factor. Transform allocation is checked before encoding; realized width/shape and budget are rechecked before explicit dense conversion. Output finiteness and float32 range are checked. See [experiment protocol](EXPERIMENT_PROTOCOL.md#day-5-preprocessing-boundary) for the exact formula, policies and caller obligations. This estimate does not enforce process RSS or cover model allocations; worker enforcement remains later work.
+
+Executed checks in the locked environment:
+
+- Initial test-first run against unimplemented interfaces: **21 failed**, demonstrating absent Day 5 behavior.
+- `uv run --locked pytest tests/unit/test_preprocessing.py tests/unit/test_resource_estimates.py -q`: **21 passed in 6.37 s, zero skips**.
+- `uv run --locked pytest -q`: **226 passed in 16.74 s, zero skips**, including all 205 previous tests.
+- `uv lock --check`: exited 0, resolved 107 packages without lock changes.
+- `git diff --check` and final `git diff --cached --check`: exited 0. The staged file list contains only the seven Day 5 source/test/documentation paths.
+
+A separate read-only review found no actionable correctness or leakage issues and independently ran the two new test files: **21 passed, zero skips**. No candidate-score reproducibility, hardware performance, worker resource safety or milestone completion is implied. The local ignored implementation plan marks D5a/D5b complete; it remains outside Git under the existing repository policy. Source, tests, protocol and public validation evidence are included in the Day 5 commit.
