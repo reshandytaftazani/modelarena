@@ -109,6 +109,153 @@ class TrainingView:
 
 
 @dataclass(frozen=True, slots=True)
+class InnerSplit:
+    """Persisted MLP early-stopping partition inside one outer training set.
+
+    ``fit_row_ids`` and ``validation_row_ids`` are ascending, disjoint and cover
+    exactly the outer fold's training rows. ``expanded`` records that rounding
+    20% could not keep both binary labels, so the smallest usable size was used.
+    """
+
+    fit_row_ids: tuple[int, ...] = field(repr=False)
+    validation_row_ids: tuple[int, ...] = field(repr=False)
+    expanded: bool
+    seed: int
+
+    def __post_init__(self) -> None:
+        for name in ("fit_row_ids", "validation_row_ids"):
+            _check_row_ids(getattr(self, name))
+        if len(self.fit_row_ids) < 2 or len(self.validation_row_ids) < 2:
+            raise ValueError("Inner partitions need at least two rows each")
+        if set(self.fit_row_ids) & set(self.validation_row_ids):
+            raise ValueError("Inner partitions must be disjoint")
+        if type(self.expanded) is not bool:
+            raise ValueError("Inner expansion flag must be boolean")
+        _check_seed(self.seed, "inner seed")
+
+
+@dataclass(frozen=True, slots=True)
+class FoldManifest:
+    """One frozen outer fold with its persisted inner early-stopping split."""
+
+    fold_index: int
+    fit_row_ids: tuple[int, ...] = field(repr=False)
+    validation_row_ids: tuple[int, ...] = field(repr=False)
+    inner: InnerSplit
+
+    def __post_init__(self) -> None:
+        if type(self.fold_index) is not int or self.fold_index < 0:
+            raise ValueError("Fold index must be a nonnegative integer")
+        for name in ("fit_row_ids", "validation_row_ids"):
+            _check_row_ids(getattr(self, name))
+        if len(self.fit_row_ids) < 2 or len(self.validation_row_ids) < 2:
+            raise ValueError("Fold partitions need at least two rows each")
+        if set(self.fit_row_ids) & set(self.validation_row_ids):
+            raise ValueError("Fold partitions must be disjoint")
+        if not isinstance(self.inner, InnerSplit):
+            raise ValueError("Fold requires a persisted inner split")
+        if set(self.inner.fit_row_ids) | set(self.inner.validation_row_ids) != set(self.fit_row_ids):
+            raise ValueError("Inner split must cover exactly the outer training rows")
+
+
+@dataclass(frozen=True, slots=True)
+class SplitManifest:
+    """Immutable 80/20 partition plus frozen outer and inner fold identities.
+
+    Only row identities, digests and reasons are stored; no feature values and
+    no holdout content. ``manifest_sha256`` is verified by ``verify_manifest``.
+    """
+
+    schema_version: int
+    split_seed: int
+    algorithm: str
+    dataset_sha256: str
+    config_sha256: str
+    row_count: int
+    train_row_ids: tuple[int, ...] = field(repr=False)
+    holdout_row_ids: tuple[int, ...] = field(repr=False)
+    train_sha256: str
+    holdout_sha256: str
+    fold_count: int
+    fold_reason: str
+    fold_warning: str
+    folds: tuple[FoldManifest, ...] = field(repr=False)
+    holdout_reason: str
+    manifest_sha256: str
+    splitter_version: str = "unknown"
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("Unsupported split manifest schema")
+        _check_seed(self.split_seed, "split seed")
+        if self.algorithm not in ("stratified_kfold", "kfold"):
+            raise ValueError("Unsupported fold algorithm")
+        if not isinstance(self.splitter_version, str) or not self.splitter_version or len(self.splitter_version) > 100:
+            raise ValueError("Splitter library version must be recorded")
+        for name in ("dataset_sha256", "config_sha256", "train_sha256", "holdout_sha256", "manifest_sha256"):
+            _check_digest(getattr(self, name), name)
+        if type(self.row_count) is not int or self.row_count < 4:
+            raise ValueError("Split requires at least four rows")
+        _check_row_ids(self.train_row_ids)
+        _check_row_ids(self.holdout_row_ids)
+        if not self.train_row_ids or len(self.holdout_row_ids) < 2:
+            raise ValueError("Holdout requires at least two rows")
+        if set(self.train_row_ids) & set(self.holdout_row_ids):
+            raise ValueError("Training and holdout rows must be disjoint")
+        all_ids = set(self.train_row_ids) | set(self.holdout_row_ids)
+        # Validate the supplied identities; never allocate from an untrusted
+        # persisted row_count before the checksum has been checked.
+        if len(all_ids) != self.row_count or max(all_ids) >= self.row_count:
+            raise ValueError("Partitions must be exhaustive and within the row count")
+        if type(self.fold_count) is not int or not 2 <= self.fold_count <= 5:
+            raise ValueError("Between two and five folds are required")
+        if not isinstance(self.folds, tuple) or len(self.folds) != self.fold_count:
+            raise ValueError("Persisted folds must match the effective fold count")
+        if any(not isinstance(fold, FoldManifest) for fold in self.folds):
+            raise ValueError("Invalid fold record")
+        if tuple(fold.fold_index for fold in self.folds) != tuple(range(self.fold_count)):
+            raise ValueError("Fold indices must be ordered and complete")
+        train = set(self.train_row_ids)
+        for fold in self.folds:
+            if set(fold.fit_row_ids) | set(fold.validation_row_ids) != train:
+                raise ValueError("Each fold must partition exactly the training rows")
+        validation_ids = [i for fold in self.folds for i in fold.validation_row_ids]
+        if len(validation_ids) != len(train) or set(validation_ids) != train:
+            raise ValueError("Every training row must be validated exactly once")
+        if self.fold_reason == "preferred_five_folds":
+            if self.fold_count != 5 or self.fold_warning:
+                raise ValueError("Preferred five folds cannot carry an adaptation warning")
+        elif self.fold_reason == f"reduced_from_five_folds:{self.fold_count}":
+            if not self.fold_warning:
+                raise ValueError("Reduced fold count requires a recorded warning")
+        else:
+            raise ValueError("Fold reason must state preference or the reduced count")
+        if self.holdout_reason != "default_20_percent":
+            raise ValueError("Only the default 20 percent holdout is supported in policy v1")
+
+
+def _check_row_ids(values: object) -> None:
+    if not isinstance(values, tuple) or not values:
+        raise ValueError("Row identities must be a nonempty tuple")
+    if any(type(value) is not int or value < 0 for value in values):
+        raise ValueError("Row identities must be nonnegative integers")
+    if tuple(sorted(values)) != values:
+        raise ValueError("Row identities must be persisted in ascending order")
+    if len(set(values)) != len(values):
+        raise ValueError("Row identities must be unique")
+
+
+def _check_seed(value: object, name: str) -> None:
+    if type(value) is not int or not 0 <= value < 2**32:
+        raise ValueError(f"{name} must be an unsigned 32-bit integer")
+
+
+def _check_digest(value: object, name: str) -> None:
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
+
+
+@dataclass(frozen=True, slots=True)
 class NumericSummary:
     count: int
     mean: float | None
