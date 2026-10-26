@@ -1,5 +1,31 @@
 # Validation evidence
 
+## Day 6 — 2026-10-26
+
+The user authorized Day 6 implementation, English output, commit and push, and chose a new branch in the existing checkout: `feat/day-6-metrics-baseline-cv`. The starting tree was clean and its full suite passed **226 tests**, zero skips. No dependencies changed or datasets were downloaded. Only small offline synthetic fixtures were fitted; no holdout scoring, named demonstration, performance benchmark or release gate was run. Day 7 onward remains unimplemented.
+
+Delivered:
+
+- Frozen metric/CV result contracts and preselected task-specific primary metrics in `RunConfig`.
+- Exact binary precision, recall, F1, fixed-order confusion matrix, ROC-AUC and non-interpolated AP; encoded positive label 1, inclusive 0.5 probability threshold, aligned finite bounded scores. Undefined metrics are null with reasons. A no-positive-prediction baseline with actual positives retains F1=0 despite null precision.
+- Regression MAE, RMSE and R2; constant-target and single-sample R2 are explicitly null rather than coerced to a finite sklearn default. Unrepresentable arithmetic fails safely.
+- A bounded Dummy-only classical factory and serial frozen-fold evaluator using fresh Day 5 guarded preprocessing, training-only global-ID mapping, separate fit/score/total timings, complete-fold means and population standard deviations (`ddof=0`). Failed, missing or duplicate folds and undefined primary scores cannot rank. No partial-fold mean is published; undefined secondary scores do not invalidate a valid primary.
+- Protocol/README updates. Generated Graphify files are ignored; `graphify update .` succeeded after implementation. No generated dataset, model or runtime report is committed.
+
+Executed evidence:
+
+- Metrics tests first failed because `ml.evaluation` did not exist, then passed **37 tests**. One test fixture was corrected because its prediction contradicted its supplied 0.6 probability and the fixed threshold.
+- CV tests first failed because `TrainingContext` did not exist, then passed **14 integration tests**. Tests guard both held-out feature and target indexing, verify original fold identities and exactly five results, inspect fresh outer-fit-only preprocessing, hand-check the regression mean baseline, distinguish population/sample std, verify exact rerun metrics and reject partial/failed/undefined-primary results. Memory rejection produces failed folds, never scores.
+- `uv run pytest -q`: **277 passed in 11.91 s, zero skips**, including all 226 prior tests.
+- Independent read-only review reran all **277 tests** and separately exercised validation-only categories with entirely missing numeric/categorical columns. It found no Critical or Important issues.
+- `uv lock --check` and `git diff --check` exited 0; Git's CRLF normalization notices are not whitespace errors.
+
+Final pre-commit verification on the completed source: `uv run --locked pytest tests/unit/test_metrics.py -q` — **37 passed in 3.37 s**; `uv run --locked pytest tests/integration/test_baseline_cv.py -q` — **14 passed in 5.92 s**; `uv run --locked pytest -q` — **277 passed in 10.29 s**, all with zero skips. Lock and whitespace checks also passed. The requested delivery is a new remote branch, not a merge to `main` or a release; its commit identifier is available in Git history.
+
+Nonblocking review Minor, deferred: fold failures currently share the safe `fold_execution_failed` code. Ranking is safe and raw exception text is suppressed, but categorized resource/data/execution diagnostics would make remediation easier. Detailed safe diagnostics belong with later worker/tracking integration; this limitation is not a claim of production-ready error reporting.
+
+Execution decisions: use direct D6a/D6b tasks and a local ignored ledger rather than task-extraction scripts for standalone numbered plans (bookkeeping only). Continue to defer worker cancellation, hard native-fit deadlines, durable publication and additional classical families to their assigned days; this evaluator is not exposed on an API request thread. The source-content identity boundary remains `training_from_manifest`; the evaluator rechecks configuration/manifest/row identity, not raw dataset fingerprints from manually constructed views. In-progress documentation was checked separately by the implementer. G1 remains blocked on Day 7; G2–G4 remain unpassed.
+
 ## Day 1 — 2026-10-22
 
 Scope authorized by the user's request to implement Day 1 only. Day 2 onward, frontend scaffolding, training, benchmarks and dataset downloads were not executed. The user confirmed 2–3 focused hours per day.

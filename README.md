@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 5 fold preprocessing](https://img.shields.io/badge/status-day_5_fold_preprocessing-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 6 metrics and Dummy CV](https://img.shields.io/badge/status-day_6_metrics_and_Dummy_CV-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 5 verified locally:** Fold-local imputation, scaling and one-hot encoding now provide guarded dense outputs, building on frozen splits and training-only profiles. The dashboard, API server, production training workflows, durable evaluation locks and full benchmark comparison remain planned.
+> **Day 6 verified locally:** Exact task metrics and Dummy classification/regression CV now run on frozen training folds with guarded fold-local preprocessing, timing and complete-fold mean/std. The dashboard, API server, durable worker/tracking, evaluation locks and full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -86,12 +86,13 @@ Verified delivery as of **2026-10-26**:
 | Day 3 task validation and training profiles | Committed | 150 tests passed, zero skips; `d58159f`; see [validation evidence](docs/VALIDATION.md#day-3--2026-10-26) |
 | Day 4 immutable splits and fold feasibility | Committed | 205 tests passed, zero skips; `64a8804`; see [validation evidence](docs/VALIDATION.md#day-4--2026-10-26) |
 | Day 5 fold-local preprocessing and memory guards | Committed | 226 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-5--2026-10-26) |
-| G1 — Data correctness | In progress; gate not passed | Days 1–5 complete; Days 6–7 pending |
+| Day 6 exact metrics and Dummy CV | Verified; delivery on `feat/day-6-metrics-baseline-cv` | 277 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-6--2026-10-26) |
+| G1 — Data correctness | In progress; gate not passed | Days 1–6 complete; Day 7 pending |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Five daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions, fold-local preprocessing, allocation guards and initial instrumentation; the complete leakage-safe ML pipeline, worker resource enforcement, and application usability require later acceptance checks.
+Six daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions, fold-local preprocessing, allocation guards, exact task metrics, Dummy CV and initial instrumentation; the full candidate suite, worker resource enforcement, tracking and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 

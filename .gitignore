@@ -29,6 +29,7 @@ __pycache__/
 htmlcov/
 *.egg-info/
 .sdd-workspace/
+/graphify-out/
 
 # Frontend dependencies and build/test output
 node_modules/
