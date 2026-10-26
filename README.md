@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 6 metrics and Dummy CV](https://img.shields.io/badge/status-day_6_metrics_and_Dummy_CV-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 7 durable queue](https://img.shields.io/badge/status-day_7_durable_queue-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 6 verified locally:** Exact task metrics and Dummy classification/regression CV now run on frozen training folds with guarded fold-local preprocessing, timing and complete-fold mean/std. The dashboard, API server, durable worker/tracking, evaluation locks and full benchmark comparison remain planned.
+> **Day 7 verified locally:** SQLite now preserves immutable experiment metadata and an idempotent, bounded single-slot queue. Both task fixtures pass CSV-to-Dummy integration on frozen training folds. The dashboard, API server, process worker/recovery, tracking, final evaluation locks and full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -86,8 +86,9 @@ Verified delivery as of **2026-10-26**:
 | Day 3 task validation and training profiles | Committed | 150 tests passed, zero skips; `d58159f`; see [validation evidence](docs/VALIDATION.md#day-3--2026-10-26) |
 | Day 4 immutable splits and fold feasibility | Committed | 205 tests passed, zero skips; `64a8804`; see [validation evidence](docs/VALIDATION.md#day-4--2026-10-26) |
 | Day 5 fold-local preprocessing and memory guards | Committed | 226 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-5--2026-10-26) |
-| Day 6 exact metrics and Dummy CV | Verified; delivery on `feat/day-6-metrics-baseline-cv` | 277 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-6--2026-10-26) |
-| G1 — Data correctness | In progress; gate not passed | Days 1–6 complete; Day 7 pending |
+| Day 6 exact metrics and Dummy CV | Committed | 277 tests passed, zero skips; `2b4d8b4`; see [validation evidence](docs/VALIDATION.md#day-6--2026-10-26) |
+| Day 7 SQLite metadata and durable queue | Committed | G1 acceptance: 310 tests passed, zero skips; `4b3ca13`; see [validation evidence](docs/VALIDATION.md#day-7--2026-10-26) |
+| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass; process worker is the next milestone |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |

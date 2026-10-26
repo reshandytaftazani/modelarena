@@ -1,5 +1,40 @@
 # Validation evidence
 
+## Day 7 — 2026-10-26
+
+The user authorized Day 7 implementation, English output, commit and push, and chose the current checkout on a new branch (`feat/day-7-durable-queue`). No dependencies, frontend scaffold, network dataset fetch or holdout evaluation were added. Days 8–28 remain unimplemented.
+
+Delivered:
+
+- Version-one local application SQLite schema, WAL, per-connection foreign keys and FULL synchronous commits. Immutable dataset/configuration/split/experiment records include hashes, frozen run limits, explicit task/positive label, duplicate acknowledgement and a training-only profile. Split JSON preserves outer/inner row identities; feature/target records are not stored. Schema also reserves candidates and the singleton worker lease; this is separate from MLflow.
+- Parameterized enqueue/claim/cancel operations with short `BEGIN IMMEDIATE` transactions. Idempotency keys are globally unique and compare immutable experiment payload identity; retries return the original job even after reopening or filling the queue. Waiting queue defaults to ten, with lower frozen limits supported. Claims are FIFO, create unique attempts and bind the owner/generation and singleton slot in the same transaction as their audit event. A unique index additionally prohibits two running jobs.
+- Queued cancellation is terminal and never claimable. Running cancellation persists intent without releasing the slot. Repeated cancellation and terminal-job cancellation are no-ops. Safe logs contain generated IDs, not keys, raw records or private paths. Audit events are append-only while records are retained; later retention work must explicitly handle their controlled deletion.
+- Bounded contention policy: a five-second SQLite busy timeout per BEGIN attempt, at most two retries (three attempts total, roughly fifteen seconds plus scheduler overhead). Tests lower this to 25 ms with one retry without relaxing production limits. Transactions roll back job, lease and audit together on injected failures.
+- Temporary-store integration for binary classification and regression: mixed numeric/categorical input with missing features, frozen split JSON round trip, saved configuration/run/profile metadata, training-only views, explicit test-driven Dummy evaluation on five folds and deterministic score summaries. Poison holdout records reject any CV indexing of reserved rows. Duplicate fixtures include full-row repeats and identical features with different labels; acknowledgement is required before any dataset/experiment metadata is persisted.
+
+Verification executed on Windows, Python 3.12 and the existing locked environment:
+
+| Command / check | Observed result |
+|---|---|
+| Baseline `uv run --locked pytest -q` | 277 passed in 12.89 s, zero skips |
+| Initial queue tests before implementation | Collection failed because `apps.api.database` did not exist |
+| First implemented queue suite | 14 passed in 4.58 s, zero skips |
+| Expanded queue and integration checks | 31 passed, two integration fixture failures; missing numeric values plus repeated categories had unintentionally created duplicate features. Corrected the fixture, not the duplicate policy. |
+| `uv run --locked pytest tests/unit tests/integration/test_data_flow.py tests/integration/test_baseline_cv.py tests/integration/test_job_repository.py -q` | 310 passed in 15.14 s, zero skips |
+| Full regression `uv run --locked pytest -q` | 310 passed in 13.24 s, zero skips |
+| `uv lock --check` / `git diff --check` | Both exited 0 |
+| `graphify update .` | AST-only update completed; graph artifacts remain ignored. Community labels may need refreshing; no paid/API extraction was run. |
+
+**G1 data-correctness gate passes locally.** This does not establish a working background process or a release. Day 7's integration explicitly calls CV from test code; preparing or enqueueing an experiment never runs training. Candidate publication, MLflow verification, worker execution/heartbeats, stale-owner liveness checks, cancellation of native fitting and terminal result transitions belong to Days 8–12. The initial lease generation is one; no expiry-based takeover is permitted. Final holdout reservation and one-time evaluation remain Days 14/19. Upload path persistence, HTTP transport and retention are not implemented by these metadata primitives.
+
+Initial resource decision: retain **provisional T=4 and 4 GiB RSS**, with all existing caps unchanged. The actual Day 2 probe recorded 5.29885 s total wall time, 152.36 MiB peak sampled process RSS and 4.8202 GiB minimum sampled available RAM. It was a small battery-powered parser/Dummy probe, not a full classical/MLP or usability benchmark; it cannot justify raising/lowering limits or selecting a final thread count. Day 21's 2/4/6 comparison remains required.
+
+Independent read-only review approved Day 7 with **no Critical/Important findings** and independently reran the 310-test G1 gate and 33-test Day 7 suite, with zero skips. One minor is deferred: SQLite's running-job `CHECK` accepts NULL `owner_generation` when written directly through SQL, because a NULL CHECK expression is not false. The implemented claim path always writes a validated positive generation; no repository-path failure was found. Add an explicit `IS NOT NULL` constraint and regression when extending worker state/schema. This does not authorize treating malformed ownership as safe during recovery.
+
+Review scope decisions: native cancellation/liveness/recovery remain Days 8–9; tracking/publication remains Day 12; finalization crash boundaries remain Days 14/19; complete deletion remains Days 13/25. Existing Day 3/5 duplicate/preprocessing checks were rerun in G1 and their service boundaries reviewed; this is not a new exhaustive audit of those modules. None of these future features is claimed as delivered. If their later integration bypasses the recorded boundaries, G1 alone cannot establish overall safety.
+
+Commit verification: `4b3ca13` — `feat(jobs): persist idempotent single-worker queue and experiment metadata`. All seven new implementation/test files were staged explicitly, and the complete staged diff and whitespace checks were reviewed. The full suite passed again immediately before commit: **310 passed in 14.69 s, zero skips**. Only README and this evidence file remained modified afterward; runtime/user data and local planning/graph files were not staged. A following documentation commit publishes the verified delivery and G1 status. Remote push is verified separately after these commits, not presumed from local commits.
+
 ## Day 6 — 2026-10-26
 
 The user authorized Day 6 implementation, English output, commit and push, and chose a new branch in the existing checkout: `feat/day-6-metrics-baseline-cv`. The starting tree was clean and its full suite passed **226 tests**, zero skips. No dependencies changed or datasets were downloaded. Only small offline synthetic fixtures were fitted; no holdout scoring, named demonstration, performance benchmark or release gate was run. Day 7 onward remains unimplemented.
