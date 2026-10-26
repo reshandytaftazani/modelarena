@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 3 data validation](https://img.shields.io/badge/status-day_3_data_validation-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 4 frozen splits](https://img.shields.io/badge/status-day_4_frozen_splits-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 3 verified locally:** Explicit task, label and feature validation, duplicate acknowledgement, and training-only profiles extend the Day 2 parser and resource probe. The dashboard, API server, persisted splits, production training workflows, and full benchmark comparison remain planned.
+> **Day 4 verified locally:** Frozen holdout, outer-CV and inner-MLP partitions now have checked JSON persistence and a training-only profile boundary. The dashboard, API server, production training workflows, durable evaluation locks and full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -84,12 +84,13 @@ Verified delivery as of **2026-10-26**:
 | Day 1 environment, settings and inventory | Committed | 59 tests passed, zero skips; `2dc1dc7`, `f989c16`, `de54447`; see [validation evidence](docs/VALIDATION.md#day-1-commit-verification--2026-10-23) |
 | Day 2 CSV parsing and initial resource probe | Committed | 103 tests passed, zero skips; `6270779`, `44be1cb`; actual four-thread probe and staged commit verification recorded in [validation evidence](docs/VALIDATION.md#day-2--2026-10-23) |
 | Day 3 task validation and training profiles | Committed | 150 tests passed, zero skips; `d58159f`; see [validation evidence](docs/VALIDATION.md#day-3--2026-10-26) |
-| G1 — Data correctness | In progress; gate not passed | Days 1–3 complete; Days 4–7 pending |
+| Day 4 immutable splits and fold feasibility | Committed | 205 tests passed, zero skips; `64a8804`; see [validation evidence](docs/VALIDATION.md#day-4--2026-10-26) |
+| G1 — Data correctness | In progress; gate not passed | Days 1–4 complete; Days 5–7 pending |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Two daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, structural parsing, and initial instrumentation; the complete leakage-safe ML pipeline, worker resource enforcement, and application usability require later acceptance checks.
+Four daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions and initial instrumentation; the complete leakage-safe ML pipeline, worker resource enforcement, and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
@@ -147,6 +148,8 @@ Day 3 adds `configure_dataset(parsed, config)` with frozen `DatasetConfig` and o
 
 Repeated selected, typed features require explicit acknowledgement, including complete repeats and differing labels. No rows are removed. Numeric spellings such as `1` and `1.0` compare equally for this gate. Detailed duplicate counts are exposed only through `profile_training(view)`, together with training dimensions, missingness, population standard deviation, linear quartiles, target distribution and heuristic warnings. Category top counts are capped at five per feature and warnings at twenty, with a truncation flag. Review ID-like and post-outcome features before experiments; Bank pre-call prediction requires excluding `duration`.
 
-The internal `training_view(configured, row_ids)` copies only trusted training rows and retains no parent dataset reference. It does not establish split provenance: persisted, disjoint partitions and feasibility checks belong to Day 4. Do not expose this helper to arbitrary client indices or use profiles to fit preprocessing. Grouped/temporal evaluation remains unsupported, and duplicate acknowledgement does not establish row independence.
+Day 4 adds `create_split(parsed, config, RunConfig())`, canonical JSON persistence with `write_manifest`/`read_manifest`, and `training_from_manifest(configured, manifest)`. The latter verifies source/configuration identity and checksum before copying persisted training rows for profiling. The default holdout is 20%, rounded up with a two-row minimum; outer CV prefers five folds and adapts only when all inner MLP partitions remain feasible. Binary splits require both labels throughout; regression validation sets require at least two rows. Conflicting writes cannot replace a frozen manifest. See the [experiment protocol](docs/EXPERIMENT_PROTOCOL.md) for seeds, hashes, feasibility and storage behavior.
+
+The lower-level `training_view(configured, row_ids)` remains a trusted internal helper. Do not expose it to arbitrary client indices or use profile statistics to fit preprocessing. Persisted files do not yet provide the durable evaluation-scope lock, which remains later work. Grouped/temporal evaluation remains unsupported, and duplicate acknowledgement does not establish row independence.
 
 This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Worker termination, API responsiveness, and the full 2/4/6-thread comparison remain later acceptance tasks.
