@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 7 durable queue](https://img.shields.io/badge/status-day_7_durable_queue-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 8 spawned worker](https://img.shields.io/badge/status-day_8_spawned_worker-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 7 verified locally:** SQLite now preserves immutable experiment metadata and an idempotent, bounded single-slot queue. Both task fixtures pass CSV-to-Dummy integration on frozen training folds. The dashboard, API server, process worker/recovery, tracking, final evaluation locks and full benchmark comparison remain planned.
+> **Day 8 verified locally:** a single-slot supervisor now claims queued work and runs it in a genuinely spawned Windows child process, with independent heartbeats, persisted progress, sampled RSS/CPU telemetry, scoped thread pools and allowlisted failure codes. Dataset cross-validation inside that child, cancellation grace, restart recovery, tracking, final evaluation locks and the full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -88,12 +88,13 @@ Verified delivery as of **2026-10-26**:
 | Day 5 fold-local preprocessing and memory guards | Committed | 226 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-5--2026-10-26) |
 | Day 6 exact metrics and Dummy CV | Committed | 277 tests passed, zero skips; `2b4d8b4`; see [validation evidence](docs/VALIDATION.md#day-6--2026-10-26) |
 | Day 7 SQLite metadata and durable queue | Committed | G1 acceptance: 310 tests passed, zero skips; `4b3ca13`; see [validation evidence](docs/VALIDATION.md#day-7--2026-10-26) |
-| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass; process worker is the next milestone |
+| Day 8 Windows-safe spawned worker | Committed | 336 tests passed, zero skips; real Windows children at T=2/4/6, no mocks; see [validation evidence](docs/VALIDATION.md#day-8--2026-10-26) |
+| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass; the spawned worker still runs a synthetic probe, not dataset CV |
 | G2 — Classical experiments | Not started | Acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Six daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions, fold-local preprocessing, allocation guards, exact task metrics, Dummy CV and initial instrumentation; the full candidate suite, worker resource enforcement, tracking and application usability require later acceptance checks.
+Seven daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions, fold-local preprocessing, allocation guards, exact task metrics, Dummy CV, initial instrumentation, and a spawned single-slot worker with independent heartbeat, sampled resource telemetry and scoped thread pools; the full candidate suite, dataset CV inside the child, cancellation grace, tracking and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
@@ -133,7 +134,7 @@ npm.cmd ci --ignore-scripts
 
 The root npm manifest locks the toolchain only; no frontend exists yet. `npm --prefix apps/web ci` becomes applicable on Day 22. Python dependencies use exact direct pins and the transitive `uv.lock`; torch comes from the explicit [CPU wheel index](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
-Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The 4 GiB child RSS cap and other policy-v1 settings are configuration contracts; worker enforcement and performance validation arrive in later tasks.
+Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The supervisor now enforces the 4 GiB child RSS cap, the 4 GiB system reserve and the 45-minute job deadline against a sampled child process; the sampled peak can understate a transient spike, so this is a soft cap rather than an OS quota. The 2/4/6-thread performance comparison remains a later acceptance task.
 
 Read the [project specification](docs/PROJECT_SPEC.md) for detailed requirements, evaluation rules, and the definition of done.
 
@@ -155,4 +156,4 @@ Day 4 adds `create_split(parsed, config, RunConfig())`, canonical JSON persisten
 
 The lower-level `training_view(configured, row_ids)` remains a trusted internal helper. Do not expose it to arbitrary client indices or use profile statistics to fit preprocessing. Persisted files do not yet provide the durable evaluation-scope lock, which remains later work. Grouped/temporal evaluation remains unsupported, and duplicate acknowledgement does not establish row independence.
 
-This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Worker termination, API responsiveness, and the full 2/4/6-thread comparison remain later acceptance tasks.
+This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Day 8 now spawns a real execution child, samples its RSS/CPU/system memory, terminates it on a breach, and keeps the supervising process responsive; a cooperative cancellation grace period, restart recovery and the full 2/4/6-thread performance comparison remain later acceptance tasks.

@@ -1,5 +1,55 @@
 # Validation evidence
 
+## Day 8 — 2026-10-26
+
+The user authorized Day 8 implementation, English output, commit and push, continuing on the existing checkout and branch `feat/day-7-durable-queue`. No dependency, lockfile, frontend scaffold, network dataset fetch or holdout evaluation was added. Days 9–28 remain unimplemented.
+
+Delivered:
+
+- `apps/api/workers/control.py`: a shared, import-light vocabulary for stages, terminal states and safe error codes, plus a typed workload registry. Stages and error codes are closed allowlists because they are persisted and rendered; free text, paths and exception messages cannot enter them. An unknown workload name or option key is rejected before any process is spawned, so no client-supplied path or import string is ever resolved.
+- `apps/api/workers/monitor.py`: the single definition of normalized CPU (100% means all logical processors, so one busy core of twelve is ~8.3%), sampled child RSS/CPU plus system-available memory, a continuous-breach memory-pressure tracker, and `terminate_owned_child`, which compares the `psutil` creation time before signalling and returns `False` for an unverified PID. A recycled PID can therefore never be killed.
+- `apps/api/workers/execute.py`: the spawn entrypoint. Module scope imports no numeric library, and `apply_thread_environment` runs before the first numerical import. Each measurement stage enables exactly one T-wide layer — BLAS at T with OpenMP and torch intra-op pinned to one, then torch intra-op at T with BLAS and OpenMP pinned to one — and reports both stages so nesting cannot hide inside one snapshot. A deliberate workload failure emits only the closed code `workload_failed`; the exception text never crosses the process boundary.
+- `apps/api/workers/supervisor.py`: `run_once` claims at most one job, spawns exactly one non-daemon child through the `spawn` context, samples it, heartbeats on its own timer independently of child progress, enforces the RSS cap, the continuous system-reserve breach and the job deadline, and publishes one terminal transition. Publication requires the verified attempt owner and attempt id, so a stale supervisor cannot overwrite a result. A cancel request observed while the job is still running ends it as `cancelled` instead of publishing success. Publication degrades rather than escaping: unrenderable telemetry is dropped so the job still reaches a terminal state and releases the slot. The parent never imports a numeric library and never fits.
+- `apps/api/database/repository.py`: `lease_generation`, `cancel_requested`, `heartbeat`, `record_progress`, `finish_job` and the ownership guard. Every worker write re-verifies job state, owner token, generation and the singleton slot inside the same short `BEGIN IMMEDIATE` transaction. `finish_job` releases the slot atomically with the terminal state and appends a numbers-only telemetry event to the append-only audit trail; a non-numeric or non-finite telemetry value is rejected rather than stored.
+- `scripts/benchmark.py` now imports the shared `normalized_cpu_percent` instead of duplicating the formula, so the probe and the worker cannot drift apart.
+- The deferred Day 7 schema minor was re-examined and deliberately **not** changed. Rebuilding the released `jobs` table to add an `IS NOT NULL` clause is a destructive migration outside Day 8's scope; the repository path always writes a validated positive generation, and the constraint belongs with the Day 9 schema work that already touches worker state.
+
+Verification executed on Windows 11, Python 3.12.15, 6 physical / 12 logical processors, using the existing locked environment (`uv 0.13.5`):
+
+| Command / check | Observed result |
+|---|---|
+| Spawn feasibility probe before implementation | A real spawned child ran and reported a different PID under pytest on Windows |
+| Thread-pool probe before implementation | At T=2/4/6, BLAS, OpenMP and torch intra-op were confirmed controllable; the probe exposed that torch's intra-op pool defaults to the physical core count and ignored `OMP_NUM_THREADS`, which the implementation then pinned explicitly |
+| New worker suites before implementation | Collection failed with `ModuleNotFoundError: apps.api.workers`, confirming the tests exercised absent code |
+| `uv run --locked pytest tests/integration/test_worker_spawn.py -q` | 11 passed, zero skips (10.2–11.5 s) |
+| `uv run --locked pytest tests/integration/test_resource_monitoring.py -q` | 15 passed, zero skips (18.3–19.4 s) |
+| Both new suites together | 26 passed, zero skips, repeated eight times (26.3–28.8 s) |
+| Full regression `uv run --locked pytest -q` | **336 passed, zero skips** in every run; observed wall time 36.9–48.4 s across dozens of consecutive runs after the final code change |
+| `uv lock --check` / `git diff --check` | Both exited 0; Git's CRLF normalization notices are not whitespace errors |
+
+Observed real-process evidence, not mocks:
+
+- A completed job's `pid` differs from the supervising process, `parent_pid` equals it, and the persisted lease slot is released with no job left `running`.
+- Progress stages (`starting`, `preparing`, `fitting`) are readable from SQLite while the child is still running, not only after it finishes.
+- Heartbeat timestamps keep changing while the child emits nothing for 1.5 s, proving heartbeats do not depend on child progress.
+- Two supervisors racing for two queued jobs produce a maximum of one `running` row, exactly one claim and one completion; the second job stays queued.
+- Database reads from the supervising process stay responsive (mean well under 100 ms) throughout a 1.2 s child fit.
+- At T=2/4/6 a real spawned child reports `torch_intra_threads == T`, `torch_interop_threads == 1`, exactly one T-wide pool per stage, and every other pool at one thread.
+- A reduced test-only 256 MiB cap with a 512 MiB allocation fails the job as `memory_limit_exceeded`, terminates the child, releases the slot and creates no candidate row. The production cap remains 4 GiB.
+- A 1 s job deadline against a 30 s workload is persisted as `timeout` in under 20 s.
+- A child exiting with code 7 is persisted as `child_exited` with no partial result.
+- A secret string injected into a deliberate workload failure appears in neither the persisted job/audit rows nor the captured logs; only `workload_failed` is stored.
+- An unverified PID is never terminated, and a verified owned child is.
+- A cancel requested while the job is running now finishes as `cancelled` with `safe_error = cancelled` and no `job_completed` audit event, rather than publishing success for abandoned work. This test was written first and failed with `completed` before the fix.
+- Unrenderable telemetry no longer strands a job: with the audit renderer forced to reject a value, the job still reaches `completed`, the slot is released and the telemetry event is simply absent. This test was also written first and failed with the raw `ValueError` escaping publication before the fix, which would have left the job `running` and the queue blocked.
+
+Known limitations of this milestone, stated so they are not mistaken for delivered features:
+
+- The child runs the internal synthetic `probe` workload. Dataset cross-validation inside the spawned child arrives with the classical registry on Days 10–12; no user data, holdout partition or trained artifact is involved in these tests.
+- Cancellation is a single check on the heartbeat cadence with no cooperative grace period, no `Event`, and no complete cancel-versus-result arbitration matrix. Queued cancellation already worked from Day 7. Full lifecycle handling, interruption recovery, stale-owner reconciliation and restart behaviour remain Day 9.
+- Resource limits are sampled, so a transient RSS spike between samples can be missed. This is a soft cap, not an OS-enforced quota, and it does not justify a final thread or memory policy.
+- No MLflow tracking, candidate publication, API transport, dashboard, or holdout evaluation exists yet; the supervisor is a library called by tests, not a running background service.
+
 ## Day 7 — 2026-10-26
 
 The user authorized Day 7 implementation, English output, commit and push, and chose the current checkout on a new branch (`feat/day-7-durable-queue`). No dependencies, frontend scaffold, network dataset fetch or holdout evaluation were added. Days 8–28 remain unimplemented.
