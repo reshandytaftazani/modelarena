@@ -15,10 +15,9 @@ Boundaries that matter for correctness:
 * Every persisted string is allowlisted. Exception text, paths and row values
   are never stored or logged.
 
-Cancellation of native fits, interruption recovery and stale-owner
-reconciliation belong to Day 9. This milestone establishes the spawn, ownership,
-progress and monitoring boundary those features build on, and it fails closed:
-an unobservable or unverified child is never killed by a stored PID alone.
+Cancellation uses a process Event with a bounded grace period. Restart
+reconciliation requires verified process death before fencing and releasing the
+slot; an unobservable child is never killed by a stored PID alone.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import multiprocessing
+import os
 from queue import Empty
 from time import perf_counter, sleep
 from typing import Any, Mapping
@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_HEARTBEAT_SECONDS = 2.0
 DEFAULT_SAMPLE_SECONDS = 0.5
 DEFAULT_POLL_SECONDS = 0.1
+DEFAULT_CANCEL_SECONDS = 0.2
 #: Grace before a breached or unresponsive child is terminated, then killed.
 TERMINATE_TIMEOUT_SECONDS = 5.0
 KILL_TIMEOUT_SECONDS = 2.0
@@ -100,6 +101,7 @@ class WorkerSupervisor:
         self.last_result: dict[str, Any] | None = None
         self.last_resources: dict[str, Any] | None = None
         self._failure_seen = False
+        self._child_created: float | None = None
 
     # -- public API ---------------------------------------------------------
     def run_once(self) -> JobRecord | None:
@@ -109,7 +111,14 @@ class WorkerSupervisor:
         self.last_result = None
         self.last_resources = None
         self._failure_seen = False
-        claimed = self.repository.claim_next(self.owner)
+        self._child_created = None
+        if not self.repository.reconcile_worker():
+            return None
+        # Recovery may have advanced the fencing generation after construction.
+        self.owner = WorkerIdentity(self.owner.owner_token, self.repository.lease_generation())
+        claimed = self.repository.claim_next(
+            self.owner, supervisor_process=(os.getpid(), monitor.process_creation_time(os.getpid())),
+        )
         if claimed is None:
             return None
         if not claimed.attempt_id:  # pragma: no cover - claim always stamps one
@@ -127,6 +136,8 @@ class WorkerSupervisor:
             # The slot moved underneath us; publish nothing.
             logger.warning("Ownership lost for job %s; no result published", job.job_id)
             return self.repository.get_job(job.job_id)
+        except KeyboardInterrupt:
+            outcome = _Outcome("interrupted", "interrupted", "supervisor_stopped")
         except Exception:
             # Only a closed code crosses this boundary; no exception text.
             logger.warning("Supervisor failure while executing job %s", job.job_id)
@@ -144,10 +155,13 @@ class WorkerSupervisor:
             logger.warning("Dropping unrenderable telemetry for job %s", job.job_id)
             telemetry = None
         try:
-            return self.repository.finish_job(
+            final = self.repository.finish_job(
                 self.owner, job.job_id, attempt_id, state=outcome.state,
                 stage=outcome.stage, safe_error=outcome.code, telemetry=telemetry,
             )
+            if final.state != "completed":
+                self.last_result = None
+            return final
         except ConflictError:
             logger.warning("Stale supervisor refused publication for job %s", job.job_id)
             return self.repository.get_job(job.job_id)
@@ -169,6 +183,8 @@ class WorkerSupervisor:
     def _spawn_and_wait(self, job: JobRecord, attempt_id: str) -> _Outcome:
         context = multiprocessing.get_context("spawn")
         messages = context.Queue()
+        self._cancel_event = context.Event()
+        start_event = context.Event()
         process = context.Process(
             # The spawn target must live in ``execute`` so the fresh interpreter
             # imports only the light control module. A supervisor helper would
@@ -176,7 +192,7 @@ class WorkerSupervisor:
             # ``apply_thread_environment`` could bound any pool.
             target=execute.child_main,
             args=(job.job_id, attempt_id, self._child_limits(), self.workload,
-                  dict(self.options), messages),
+                  dict(self.options), messages, self._cancel_event, start_event),
             name=f"modelarena-exec-{job.job_id[:8]}",
             daemon=False,
         )
@@ -184,6 +200,10 @@ class WorkerSupervisor:
         try:
             process.start()
             self.last_child_pid = process.pid
+            self._child_created = monitor.process_creation_time(process.pid)
+            self.repository.record_child(self.owner, job.job_id, attempt_id,
+                                         process.pid, self._child_created)
+            start_event.set()
             logger.info("Spawned execution child pid=%s", process.pid)
             # A child that dies before psutil can read its creation time stays
             # unsampled instead of aborting the run: monitoring then continues
@@ -196,6 +216,11 @@ class WorkerSupervisor:
             except RuntimeError:
                 sampler = None
             outcome = self._monitor(process, messages, job, sampler)
+        except KeyboardInterrupt:
+            self._cancel_event.set()
+            if process.pid is not None:
+                process.join(5.0)
+            raise
         finally:
             self._shutdown(process, messages, sampler)
         return outcome
@@ -206,17 +231,15 @@ class WorkerSupervisor:
         # unstarted process asserts, so that case must not reach ``join``.
         if process.pid is not None:
             if process.is_alive():
-                try:
-                    creation_time = monitor.process_creation_time(process.pid)
-                except RuntimeError:
-                    creation_time = None
+                creation_time = self._child_created
                 if creation_time is not None:
                     monitor.terminate_owned_child(
                         process.pid, creation_time=creation_time,
-                        timeout=TERMINATE_TIMEOUT_SECONDS,
+                        timeout=KILL_TIMEOUT_SECONDS,
                     )
-                process.join(TERMINATE_TIMEOUT_SECONDS)
-                if process.is_alive():  # pragma: no cover - defensive
+                process.join(0)
+                if (process.is_alive() and creation_time is not None
+                        and monitor.process_liveness(process.pid, creation_time) == "alive"):
                     process.kill()
                     process.join(KILL_TIMEOUT_SECONDS)
             else:
@@ -233,6 +256,10 @@ class WorkerSupervisor:
             messages.join_thread()
         except (OSError, ValueError):  # pragma: no cover - pipe already torn down
             pass
+        if process.pid is not None and process.is_alive():
+            # Never free the slot merely because cleanup failed. Reconciliation
+            # requires proof of death, including when identity was inaccessible.
+            raise ConflictError("Execution child is still alive or unverified")
 
     def _child_limits(self) -> dict[str, object]:
         """Only settings the child actually applies; it never enforces its own cap.
@@ -245,14 +272,14 @@ class WorkerSupervisor:
     def _monitor(self, process, messages, job: JobRecord, sampler) -> _Outcome:
         started = perf_counter()
         last_heartbeat = last_sample = started
-        # Cancel intent is polled on the heartbeat cadence, not every poll: it is
-        # a user action measured in seconds, and a read per 100 ms poll would add
-        # pointless SQLite traffic to every running fit.
-        last_cancel_check = started - self.heartbeat_seconds
+        # Cancellation has its own bounded cadence: even a slow heartbeat or
+        # configured monitoring poll must not postpone signalling user intent.
+        last_cancel_check = started - DEFAULT_CANCEL_SECONDS
         pressure = monitor.MemoryPressureTracker(
             self.limits.system_reserve_bytes, self.limits.memory_pressure_seconds,
         )
         stage = "starting"
+        cancel_started = None
         while True:
             now = perf_counter()
             # Drain all pending child messages before deciding anything.
@@ -275,15 +302,21 @@ class WorkerSupervisor:
                 elif message.get("kind") == "failure":
                     self._failure_seen = True
 
-            # A still-running job that the user asked to abandon must not be
-            # published as a success, so cancel is checked before the deadline
-            # and resource gates. A result already received is not abandoned:
-            # the work is finished and there is nothing left to stop. Day 9 adds
-            # the cooperative grace period and the full arbitration matrix.
-            if now - last_cancel_check >= self.heartbeat_seconds:
+            # Cancel before considering a received result. The final database
+            # transaction arbitrates requests that arrive after this check.
+            if now - last_cancel_check >= DEFAULT_CANCEL_SECONDS:
                 last_cancel_check = now
-                if self.last_result is None and self.repository.cancel_requested(job.job_id):
+                if self.repository.cancel_requested(job.job_id) and cancel_started is None:
+                    cancel_started = now
+                    self._cancel_event.set()
+                    self.last_result = None
+
+            if cancel_started is not None:
+                self.last_result = None
+                if process.exitcode is not None or now - cancel_started >= 5.0:
                     return _Outcome("cancelled", "cancelled", "cancelled")
+                sleep(min(self.poll_seconds, DEFAULT_CANCEL_SECONDS))
+                continue
 
             if self.last_result is not None:
                 process.join(TERMINATE_TIMEOUT_SECONDS)
@@ -291,7 +324,8 @@ class WorkerSupervisor:
 
             if process.exitcode is not None:
                 code = "workload_failed" if self._failure_seen else "child_exited"
-                return _Outcome("failed", "failed", code)
+                state = "failed" if self._failure_seen else "interrupted"
+                return _Outcome(state, state, code)
 
             if now - started > self.limits.cv_job_seconds:
                 return _Outcome("failed", "failed", "timeout")
@@ -314,7 +348,7 @@ class WorkerSupervisor:
                 self.repository.heartbeat(self.owner, job.job_id)
                 last_heartbeat = now
 
-            sleep(self.poll_seconds)
+            sleep(min(self.poll_seconds, DEFAULT_CANCEL_SECONDS))
 
 
 def _interval(value: object, name: str, minimum: float, maximum: float) -> float:

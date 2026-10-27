@@ -1,6 +1,16 @@
-"""Version-one application schema. No migrations run at module import time."""
+"""Application schema and additive worker-identity migration, applied explicitly."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+WORKER_PROCESSES_SQL = """
+CREATE TABLE worker_processes (
+    attempt_id TEXT PRIMARY KEY REFERENCES jobs(attempt_id),
+    supervisor_pid INTEGER NOT NULL,
+    supervisor_created REAL NOT NULL,
+    child_pid INTEGER,
+    child_created REAL
+);
+"""
 
 SCHEMA_SQL = """
 CREATE TABLE datasets (
@@ -113,3 +123,5 @@ for _table in ("datasets", "evaluation_scopes", "splits", "configurations", "exp
 CREATE TRIGGER {_table}_immutable BEFORE UPDATE ON {_table}
 BEGIN SELECT RAISE(ABORT, 'metadata is immutable'); END;
 """
+
+SCHEMA_SQL += WORKER_PROCESSES_SQL

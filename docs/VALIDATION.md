@@ -1,5 +1,29 @@
 # Validation evidence
 
+## Day 9 — 2026-10-27
+
+The user authorized Day 9 implementation, English output, commit and push, and chose the existing `feat/day-7-durable-queue` branch. The clean baseline was `4edf0f2`; `uv run --locked pytest -q` passed **336 tests in 38.20 s**, zero skips. No dependencies, lockfiles, downloads, frontend or holdout evaluation changed. Days 10–28 remain pending.
+
+Delivered:
+
+- Queued cancellation without spawn; running cancellation via a multiprocessing Event, five-second cooperative grace, then verified-child termination/join and two-second kill fallback. KeyboardInterrupt joins the active child, records interruption and preserves waiting jobs.
+- SQLite transaction arbitration: cancellation persisted before completion prevents success; an already committed completion stays completed. Noncompleted attempts invalidate candidate status and discard in-memory result payloads, including late cancellation after result receipt.
+- Schema v2 adds per-attempt supervisor/child PID and exact creation identity; an atomic v1 migration preserves existing metadata and queued jobs. The child cannot begin its workload before its identity is durably registered and its start gate opens.
+- Recovery requires both supervisor and registered child to be verified dead before interruption, generation advancement and slot release. A live supervisor or orphan, stale heartbeat alone, inaccessible identity, legacy ownership or spawn-registration gap cannot authorize new fitting. No automatic orphan termination or force-unlock is provided.
+- Explicit whole-CV retry reuses the immutable experiment, configuration and split, creates a new job/attempt, and retains the previous terminal record. Old attempts and stale generations cannot publish. Reopening the repository (the available API-restart boundary) does not stop active execution.
+
+Test-first evidence included failures for cancel arbitration, cooperative exit, KeyboardInterrupt handling, missing recovery/retry contracts, generation fencing, candidate invalidation, late result cancellation and unobservable-child cleanup before implementation. The updated Day 8 crash assertion now expects `interrupted`, as required by the Day 9 lifecycle; allowlisted workload exceptions remain `failed`.
+
+Fresh verification before review: `uv run --locked pytest -q` -> **356 passed in 64.11 s**, zero skips. The 20 new lifecycle tests include a real spawned scikit-learn HistGradientBoosting fit interrupted within ten seconds, cooperative exit without termination, actual supervisor/child termination, no-overlap restart, migration and fail-closed ownership. Synthetic fixtures only; no performance benchmark or named demonstration claim.
+
+Independent read-only review found no Critical issues, one Important issue and no new minors: cancellation polling followed a configurable heartbeat that could reach 60 seconds. A regression using a real native fit and 60-second heartbeat failed with a 12-second timeout before the fix. Cancellation now polls independently at 0.2 seconds and bounds the monitoring sleep even with a five-second poll setting. Final checkout suite: `uv run --locked pytest -q` -> **357 passed in 72.59 s**, zero skips. The native-fit deadline regression passes at both short and maximum heartbeat/poll settings. The reviewer did not independently rerun the suite; its deterministic reproduction and the implementer's RED→GREEN run are separate evidence. Earlier staged export also passed 356 tests before this fix; final staged verification is recorded below when executed.
+
+Review boundaries: future CV/leaderboard/MLflow/bundle integration remains out of Day 9 scope and requires its later acceptance tests. Public documentation was checked by the implementer, not the code reviewer. `uv lock --check` passed without lock changes. `graphify update .` refreshed the ignored AST code graph; semantic documentation nodes were not refreshed, and community labels may need a later relabel.
+
+Final staged-tree verification: exported the exact index with `git checkout-index --all` into a fresh approved temporary directory, then ran `uv run --project <export> --directory <export> --locked pytest -q` using the existing locked environment via `UV_PROJECT_ENVIRONMENT`: **357 passed in 68.68 s**, zero skips. This verifies staged source independently of the checkout, not a fresh dependency installation. Only README's delivery-state wording and this evidence paragraph were added afterward. Explicit source/test/documentation paths were staged; local plans, graph output, generated data and artifacts remain ignored. No merge, PR or release is implied by committing/pushing Day 9.
+
+Execution decisions: use the existing ignored per-day ledger for the daily-heading plan; block on live orphan/unknown ownership rather than automatically killing or guessing. This favors safety over automatic recovery; missing identity requires operator investigation. The historical direct-SQL nullable-generation CHECK minor remains deferred; repository claim validation and recovery fencing do not treat missing ownership as safe. Dataset CV, MLflow/bundle reconciliation, HTTP lifecycle routes and UI remain assigned to later days. G1 remains passed locally; G2–G4 and release acceptance remain pending.
+
 ## Day 8 — 2026-10-26
 
 The user authorized Day 8 implementation, English output, commit and push, continuing on the existing checkout and branch `feat/day-7-durable-queue`. No dependency, lockfile, frontend scaffold, network dataset fetch or holdout evaluation was added. Days 9–28 remain unimplemented.

@@ -1,8 +1,8 @@
 """Short, bounded SQLite transactions; no model fitting or automatic takeover.
 
-The first claim binds the singleton lease. Process identity, lease acquisition,
-heartbeats, completion and restart reconciliation belong to the worker milestone.
-A stale heartbeat alone never frees this slot. Paths here are trusted app-owned
+The first claim binds the singleton lease. Worker identity, heartbeat, completion
+and verified-death reconciliation use guarded transactions. A stale heartbeat
+alone never frees this slot. Paths here are trusted app-owned
 local paths, not transport input. Connections are per operation and always close.
 """
 
@@ -17,7 +17,8 @@ import sqlite3
 from typing import Iterator
 from uuid import uuid4
 
-from apps.api.database.schema import SCHEMA_SQL, SCHEMA_VERSION
+from apps.api.database.schema import SCHEMA_SQL, SCHEMA_VERSION, WORKER_PROCESSES_SQL
+from apps.api.workers.monitor import process_liveness
 from apps.api.workers.control import check_safe_error, check_stage, check_state
 from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType
 from ml.data.csv_io import ValidatedDataset
@@ -86,6 +87,13 @@ def _digest(value: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _process_identity(pid: int, created: float) -> None:
+    import math
+    if (type(pid) is not int or pid <= 0 or type(created) not in (int, float)
+            or not math.isfinite(created) or created <= 0):
+        raise ValueError("Invalid process identity")
 
 
 def _record(row: sqlite3.Row) -> JobRecord:
@@ -176,7 +184,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -194,6 +202,9 @@ class JobRepository:
                         if sqlite3.complete_statement(statement):
                             db.execute(statement)
                             statement = ""
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 1:
+                    db.execute(WORKER_PROCESSES_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise ValueError("Unsupported metadata schema version")
@@ -303,7 +314,7 @@ class JobRepository:
                 raise NotFoundError("Job not found")
             return bool(row[0])
 
-    def claim_next(self, owner: WorkerIdentity) -> JobRecord | None:
+    def claim_next(self, owner: WorkerIdentity, *, supervisor_process: tuple[int, float] | None = None) -> JobRecord | None:
         if not isinstance(owner, WorkerIdentity):
             raise TypeError("WorkerIdentity required")
         with self._transaction() as db:
@@ -322,10 +333,63 @@ class JobRepository:
                        (owner.owner_token, owner.generation, attempt_id, now, now, row["job_id"]))
             db.execute("UPDATE worker_lease SET owner_token=?,active_job_id=?,heartbeat_at=? WHERE singleton=1",
                        (owner.owner_token, row["job_id"], now))
+            if supervisor_process is not None:
+                pid, created = supervisor_process
+                _process_identity(pid, created)
+                db.execute("INSERT INTO worker_processes(attempt_id,supervisor_pid,supervisor_created) VALUES(?,?,?)",
+                           (attempt_id, pid, created))
             _audit(db, "worker", row["job_id"], "job_claimed")
             result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (row["job_id"],)).fetchone())
         logger.info("Job claimed: %s", result.job_id)
         return result
+
+    def record_child(self, owner: WorkerIdentity, job_id: str, attempt_id: str,
+                     pid: int, created: float) -> None:
+        """Persist identity before the child's start gate is opened."""
+        _process_identity(pid, created)
+        with self._transaction() as db:
+            row = self._owned_running_row(db, owner, job_id)
+            if row["attempt_id"] != attempt_id:
+                raise ConflictError("Attempt no longer owns the job")
+            result = db.execute("UPDATE worker_processes SET child_pid=?,child_created=? "
+                                "WHERE attempt_id=? AND child_pid IS NULL", (pid, created, attempt_id))
+            if result.rowcount != 1:
+                raise ConflictError("Child identity cannot be replaced")
+
+    def reconcile_worker(self) -> bool:
+        """Release only a slot whose supervisor AND registered child are dead.
+
+        Unknown ownership (including legacy running jobs or a spawn-registration
+        crash gap) blocks. Heartbeat age is deliberately irrelevant. No process
+        is killed here and no new fit overlaps a still-live orphan.
+        """
+        with self._transaction() as db:
+            lease = db.execute("SELECT * FROM worker_lease WHERE singleton=1").fetchone()
+            if lease["active_job_id"] is None:
+                return True
+            row = db.execute("SELECT * FROM jobs WHERE job_id=?", (lease["active_job_id"],)).fetchone()
+            identity = db.execute("SELECT * FROM worker_processes WHERE attempt_id=?",
+                                  (row["attempt_id"],)).fetchone()
+            if identity is None or identity["child_pid"] is None:
+                return False
+            for prefix in ("supervisor", "child"):
+                if process_liveness(identity[f"{prefix}_pid"], identity[f"{prefix}_created"]) != "dead":
+                    return False
+            now = _now()
+            db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
+                       "WHERE job_id=?", (now, row["job_id"]))
+            db.execute("UPDATE candidates SET status='interrupted' WHERE attempt_id=?", (row["attempt_id"],))
+            db.execute("UPDATE worker_lease SET generation=generation+1,owner_token=NULL,active_job_id=NULL,heartbeat_at=?",
+                       (now,))
+            _audit(db, "recovery", row["job_id"], "job_interrupted")
+            return True
+
+    def retry_cv(self, job_id: str, idempotency_key: str) -> JobRecord:
+        """Explicit whole-CV retry; immutable experiment/splits are reused."""
+        previous = self.get_job(job_id)
+        if previous.kind != "cv" or previous.state not in ("failed", "interrupted", "cancelled"):
+            raise ConflictError("Only unsuccessful terminal CV jobs can be retried")
+        return self.enqueue_cv(previous.experiment_id, idempotency_key)
 
     def heartbeat(self, owner: WorkerIdentity, job_id: str) -> JobRecord:
         """Refresh the lease and job heartbeat for the verified attempt owner."""
@@ -373,9 +437,18 @@ class JobRepository:
             row = self._owned_running_row(db, owner, job_id)
             if row["attempt_id"] != attempt_id:
                 raise ConflictError("Attempt does not own this job")
+            identity = db.execute("SELECT child_pid,child_created FROM worker_processes WHERE attempt_id=?",
+                                  (attempt_id,)).fetchone()
+            if identity is not None and identity["child_pid"] is not None:
+                if process_liveness(identity["child_pid"], identity["child_created"]) != "dead":
+                    raise ConflictError("Child death must be verified before releasing its slot")
+            if row["cancel_requested"] and state == "completed":
+                state, stage, safe_error = "cancelled", "cancelled", "cancelled"
             now = _now()
             db.execute("""UPDATE jobs SET state=?,stage=?,safe_error=?,updated_at=?,heartbeat_at=?
                           WHERE job_id=?""", (state, stage, safe_error, now, now, job_id))
+            if state != "completed":
+                db.execute("UPDATE candidates SET status=? WHERE attempt_id=?", (state, attempt_id))
             db.execute("UPDATE worker_lease SET owner_token=NULL,active_job_id=NULL,heartbeat_at=? "
                        "WHERE singleton=1 AND owner_token=?", (now, owner.owner_token))
             _audit(db, "worker", job_id, f"job_{state}")
@@ -392,8 +465,9 @@ class JobRepository:
         if (row["state"] != "running" or row["owner_token"] != owner.owner_token
                 or row["owner_generation"] != owner.generation):
             raise ConflictError("Worker no longer owns this job")
-        lease = db.execute("SELECT owner_token,active_job_id FROM worker_lease WHERE singleton=1").fetchone()
-        if lease["owner_token"] != owner.owner_token or lease["active_job_id"] != job_id:
+        lease = db.execute("SELECT owner_token,active_job_id,generation FROM worker_lease WHERE singleton=1").fetchone()
+        if (lease["owner_token"] != owner.owner_token or lease["active_job_id"] != job_id
+                or lease["generation"] != owner.generation):
             raise ConflictError("Worker no longer holds the singleton slot")
         return row
 

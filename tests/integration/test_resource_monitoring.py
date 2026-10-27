@@ -184,13 +184,13 @@ def test_child_crash_is_persisted_without_partial_results(tmp_path):
 
     final = supervisor.run_once()
 
-    assert final.state == "failed"
+    assert final.state == "interrupted"
     assert final.safe_error == "child_exited"
     assert supervisor.child_exit_code == 7
     assert supervisor.last_result is None
     with sqlite3.connect(repo.path) as db:
         assert db.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
-    assert repo.get_job(job.job_id).state == "failed"
+    assert repo.get_job(job.job_id).state == "interrupted"
 
 
 def test_workload_failure_never_echoes_raw_exception_text(tmp_path, caplog):

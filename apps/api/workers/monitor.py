@@ -20,8 +20,8 @@ import psutil
 
 MIN_INTERVAL_SECONDS = 0.05
 MAX_INTERVAL_SECONDS = 5.0
-#: Windows reuses PIDs; a generous but finite identity tolerance.
-CREATION_TIME_TOLERANCE_SECONDS = 2.0
+#: Persisted creation timestamps are compared exactly; nearby PIDs are not ours.
+CREATION_TIME_TOLERANCE_SECONDS = 0.0
 
 
 def normalized_cpu_percent(cpu_seconds: float, wall_seconds: float, logical_cores: int) -> float:
@@ -51,6 +51,19 @@ def check_interval(seconds: object) -> float:
             or not MIN_INTERVAL_SECONDS <= seconds <= MAX_INTERVAL_SECONDS):
         raise ValueError("Sample interval must be between 0.05 and 5 seconds")
     return float(seconds)
+
+
+def process_liveness(pid: int, creation_time: float) -> str:
+    """Exact PID/creation identity: inaccessible is unknown, never presumed dead."""
+    try:
+        process = psutil.Process(pid)
+        if process.create_time() != creation_time:
+            return "dead"
+        return "alive" if process.is_running() and process.status() != psutil.STATUS_ZOMBIE else "dead"
+    except psutil.NoSuchProcess:
+        return "dead"
+    except psutil.Error:
+        return "unknown"
 
 
 @dataclass(slots=True)

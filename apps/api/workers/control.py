@@ -22,7 +22,7 @@ TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 #: Fixed failure vocabulary. No exception text, path or row value may enter it.
 SAFE_ERROR_CODES = frozenset({
     "workload_failed", "child_exited", "timeout", "memory_limit_exceeded",
-    "resource_pressure", "supervisor_error", "cancelled",
+    "resource_pressure", "supervisor_error", "cancelled", "supervisor_stopped", "owner_lost",
 })
 
 

@@ -57,7 +57,7 @@ def _pool_report(pools) -> list[dict[str, Any]]:
     ]
 
 
-def _probe(options: Mapping[str, Any], queue, compute_threads: int) -> dict[str, Any]:
+def _probe(options: Mapping[str, Any], queue, compute_threads: int, cancel_event=None) -> dict[str, Any]:
     """Bounded synthetic work; never touches user data."""
     _emit(queue, PROGRESS, stage="preparing")
     allocation = None
@@ -68,7 +68,9 @@ def _probe(options: Mapping[str, Any], queue, compute_threads: int) -> dict[str,
     steps = options["steps"]
     per_step = float(options["work_seconds"]) / steps
     for _ in range(steps):
-        if per_step > 0:
+        if cancel_event is not None and cancel_event.wait(per_step):
+            return {}
+        if cancel_event is None and per_step > 0:
             time.sleep(per_step)
         _emit(queue, PROGRESS, stage="fitting")
 
@@ -135,9 +137,13 @@ def child_main(
     workload: str,
     options: Mapping[str, Any],
     queue,
+    cancel_event=None,
+    start_event=None,
 ) -> None:
     """Run one workload and report a bounded result. Never returns data rows."""
     del job_id, attempt_id  # Identifiers are for supervisor logs only.
+    if start_event is not None and not start_event.wait(10):
+        return  # Parent died before durably registering our identity; never fit.
     compute_threads = int(limits["compute_threads"])
     checked = validate_options(workload, options)
     apply_thread_environment(compute_threads)
@@ -147,7 +153,7 @@ def child_main(
         with threadpool_limits(limits=compute_threads, user_api="blas"), \
                 threadpool_limits(limits=1, user_api="openmp"):
             if workload == "probe":
-                result = _probe(checked, queue, compute_threads)
+                result = _probe(checked, queue, compute_threads, cancel_event)
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:
@@ -155,6 +161,8 @@ def child_main(
         _emit(queue, FAILURE, code="workload_failed")
         raise SystemExit(1) from None
 
+    if cancel_event is not None and cancel_event.is_set():
+        return
     if checked["crash_exit_code"]:
         os._exit(checked["crash_exit_code"])
     _emit(queue, RESULT, payload=result)
