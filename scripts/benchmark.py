@@ -1,14 +1,15 @@
 """Initial parser/Dummy probe. Run as a fresh process, outside the API.
 
 This is instrumentation preparation for Day 21, not the full comparison. The
-sampler observes the current process only; child termination belongs to Day 8.
-No network access, model export, production split or final holdout evaluation.
+sampler observes the current process only; owned-child sampling and termination
+now live in ``apps.api.workers.monitor``, which this module reuses for the single
+normalized-CPU definition. No network access, model export, production split or
+final holdout evaluation.
 """
 
 import argparse
 import hashlib
 import json
-import math
 import os
 import tempfile
 import threading
@@ -21,15 +22,8 @@ from pathlib import Path
 import psutil
 
 from apps.api.settings import load_settings
+from apps.api.workers.monitor import normalized_cpu_percent
 from ml.contracts import ResourceLimits
-
-
-def normalized_cpu_percent(cpu_seconds: float, wall_seconds: float, logical_cores: int) -> float:
-    """100% means all logical CPUs occupied, rather than one occupied CPU."""
-    if (not math.isfinite(cpu_seconds) or not math.isfinite(wall_seconds)
-            or cpu_seconds < 0 or wall_seconds <= 0 or logical_cores < 1):
-        raise ValueError("Invalid CPU observation")
-    return 100 * cpu_seconds / wall_seconds / logical_cores
 
 
 class ResourceRecorder:

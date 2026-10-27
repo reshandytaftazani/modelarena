@@ -18,6 +18,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from apps.api.database.schema import SCHEMA_SQL, SCHEMA_VERSION
+from apps.api.workers.control import check_safe_error, check_stage, check_state
 from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType
 from ml.data.csv_io import ValidatedDataset
 from ml.data.splits import _config_digest, manifest_json, verify_manifest
@@ -95,6 +96,36 @@ def _record(row: sqlite3.Row) -> JobRecord:
 def _audit(db: sqlite3.Connection, actor: str, entity: str, event: str) -> None:
     db.execute("INSERT INTO audit_events(occurred_at,actor,entity_id,event) VALUES(?,?,?,?)",
                (_now(), actor, entity, event))
+
+
+#: Only these numeric keys may be persisted as resource telemetry. Anything else
+#: (a path, an exception string, a feature value) is dropped rather than stored.
+_TELEMETRY_KEYS = frozenset({
+    "wall_seconds", "cpu_seconds", "normalized_cpu_percent", "logical_cores",
+    "peak_rss_bytes", "minimum_available_bytes", "sample_count",
+    "sample_interval_seconds", "child_pid", "child_exit_code",
+})
+
+
+def render_telemetry_event(telemetry: dict[str, object]) -> str:
+    """Render a bounded, sorted, numbers-only audit event.
+
+    Public so a caller can validate telemetry *before* opening the terminal
+    transaction; a rejected value must never abort a publication.
+    """
+    if not isinstance(telemetry, dict):
+        raise ValueError("Telemetry must be a mapping")
+    safe: dict[str, int | float] = {}
+    for key in sorted(_TELEMETRY_KEYS & set(telemetry)):
+        value = telemetry[key]
+        if value is None:
+            continue
+        if type(value) not in (int, float) or isinstance(value, bool):
+            raise ValueError("Telemetry values must be numbers")
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            raise ValueError("Telemetry values must be finite")
+        safe[key] = value
+    return "job_telemetry:" + json.dumps(safe, sort_keys=True, separators=(",", ":"))
 
 
 class JobRepository:
@@ -258,6 +289,20 @@ class JobRepository:
                 raise NotFoundError("Job not found")
             return _record(row)
 
+    def lease_generation(self) -> int:
+        """Current fencing generation; a supervisor adopts it before claiming."""
+        with self._connection() as db:
+            return int(db.execute("SELECT generation FROM worker_lease WHERE singleton=1").fetchone()[0])
+
+    def cancel_requested(self, job_id: str) -> bool:
+        """Cheap read of user intent; the worker decides how to act on it."""
+        _text(job_id)
+        with self._connection() as db:
+            row = db.execute("SELECT cancel_requested FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("Job not found")
+            return bool(row[0])
+
     def claim_next(self, owner: WorkerIdentity) -> JobRecord | None:
         if not isinstance(owner, WorkerIdentity):
             raise TypeError("WorkerIdentity required")
@@ -281,6 +326,76 @@ class JobRepository:
             result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (row["job_id"],)).fetchone())
         logger.info("Job claimed: %s", result.job_id)
         return result
+
+    def heartbeat(self, owner: WorkerIdentity, job_id: str) -> JobRecord:
+        """Refresh the lease and job heartbeat for the verified attempt owner."""
+        if not isinstance(owner, WorkerIdentity):
+            raise TypeError("WorkerIdentity required")
+        _text(job_id)
+        with self._transaction() as db:
+            row = self._owned_running_row(db, owner, job_id)
+            now = _now()
+            db.execute("UPDATE jobs SET heartbeat_at=?,updated_at=? WHERE job_id=?", (now, now, job_id))
+            db.execute("UPDATE worker_lease SET heartbeat_at=? WHERE singleton=1 AND owner_token=?",
+                       (now, owner.owner_token))
+            return _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+
+    def record_progress(self, owner: WorkerIdentity, job_id: str, stage: str) -> JobRecord:
+        """Persist one allowlisted stage; free text can never reach the database."""
+        if not isinstance(owner, WorkerIdentity):
+            raise TypeError("WorkerIdentity required")
+        stage = check_stage(stage)
+        _text(job_id)
+        with self._transaction() as db:
+            self._owned_running_row(db, owner, job_id)
+            now = _now()
+            db.execute("UPDATE jobs SET stage=?,updated_at=?,heartbeat_at=? WHERE job_id=?",
+                       (stage, now, now, job_id))
+            return _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+
+    def finish_job(self, owner: WorkerIdentity, job_id: str, attempt_id: str, *,
+                   state: str, stage: str, safe_error: str | None = None,
+                   telemetry: dict[str, object] | None = None) -> JobRecord:
+        """Publish one terminal transition and release the singleton slot atomically.
+
+        Only the verified attempt owner may finish. Resource telemetry is an
+        allowlisted, numbers-only record appended to the audit trail; no path,
+        exception text or row value can be persisted through it.
+        """
+        if not isinstance(owner, WorkerIdentity):
+            raise TypeError("WorkerIdentity required")
+        state, stage = check_state(state), check_stage(stage)
+        safe_error = check_safe_error(safe_error)
+        _text(job_id)
+        _text(attempt_id)
+        event = render_telemetry_event(telemetry) if telemetry is not None else None
+        with self._transaction() as db:
+            row = self._owned_running_row(db, owner, job_id)
+            if row["attempt_id"] != attempt_id:
+                raise ConflictError("Attempt does not own this job")
+            now = _now()
+            db.execute("""UPDATE jobs SET state=?,stage=?,safe_error=?,updated_at=?,heartbeat_at=?
+                          WHERE job_id=?""", (state, stage, safe_error, now, now, job_id))
+            db.execute("UPDATE worker_lease SET owner_token=NULL,active_job_id=NULL,heartbeat_at=? "
+                       "WHERE singleton=1 AND owner_token=?", (now, owner.owner_token))
+            _audit(db, "worker", job_id, f"job_{state}")
+            if event is not None:
+                _audit(db, "worker", job_id, event)
+            result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+        logger.info("Job %s: %s", job_id, state)
+        return result
+
+    def _owned_running_row(self, db: sqlite3.Connection, owner: WorkerIdentity, job_id: str) -> sqlite3.Row:
+        row = db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("Job not found")
+        if (row["state"] != "running" or row["owner_token"] != owner.owner_token
+                or row["owner_generation"] != owner.generation):
+            raise ConflictError("Worker no longer owns this job")
+        lease = db.execute("SELECT owner_token,active_job_id FROM worker_lease WHERE singleton=1").fetchone()
+        if lease["owner_token"] != owner.owner_token or lease["active_job_id"] != job_id:
+            raise ConflictError("Worker no longer holds the singleton slot")
+        return row
 
     def request_cancel(self, job_id: str) -> JobRecord:
         _text(job_id)
