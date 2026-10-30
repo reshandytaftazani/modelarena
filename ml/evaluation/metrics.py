@@ -4,9 +4,9 @@ import math
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
 
-from ml.contracts import MetricBundle, MetricValue, TaskType
+from ml.contracts import DiagnosticPoint, MetricBundle, MetricValue, OofDiagnostics, TaskType
 
 
 def metric_direction(task: TaskType, name: str) -> str:
@@ -90,3 +90,34 @@ def score_predictions(task: TaskType, truth: ArrayLike, prediction: ArrayLike,
     if any(metric.value is not None and not math.isfinite(metric.value) for metric in metrics):
         raise ValueError("Metric output must be finite")
     return MetricBundle(task, len(y), metrics)
+
+
+def _sample_indices(length: int, cap: int) -> tuple[int, ...]:
+    """Deterministic evenly spaced display sample, including endpoints when possible."""
+    if length <= cap:
+        return tuple(range(length))
+    if cap == 1:
+        return (0,)
+    return tuple(i * (length - 1) // (cap - 1) for i in range(cap))
+
+
+def oof_diagnostics(task: TaskType, points: tuple[DiagnosticPoint, ...], cap: int) -> OofDiagnostics:
+    """Aggregate all held-out fold predictions before limiting display points."""
+    if type(cap) is not int or cap < 1 or not points:
+        raise ValueError("OOF diagnostics require observations and a positive cap")
+    ordered = tuple(sorted(points, key=lambda point: point.row_id))
+    if len({point.row_id for point in ordered}) != len(ordered):
+        raise ValueError("OOF row identities must be unique")
+    truth = [point.truth for point in ordered]
+    predictions = [point.prediction for point in ordered]
+    probabilities = [point.probability for point in ordered] if task == TaskType.BINARY_CLASSIFICATION else None
+    metrics = score_predictions(task, truth, predictions, probabilities)
+    roc_points = pr_points = ()
+    if task == TaskType.BINARY_CLASSIFICATION and len(set(truth)) == 2:
+        fpr, tpr, _ = roc_curve(truth, probabilities)
+        precision, recall, _ = precision_recall_curve(truth, probabilities)
+        roc_points = tuple((float(fpr[i]), float(tpr[i])) for i in _sample_indices(len(fpr), cap))
+        pr_points = tuple((float(recall[i]), float(precision[i])) for i in _sample_indices(len(recall), cap))
+    return OofDiagnostics("out_of_fold_training", len(ordered),
+                          tuple(ordered[i] for i in _sample_indices(len(ordered), cap)),
+                          metrics, roc_points, pr_points)

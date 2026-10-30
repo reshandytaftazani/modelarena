@@ -456,6 +456,28 @@ class MetricSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticPoint:
+    row_id: int
+    fold_index: int
+    truth: float
+    prediction: float
+    probability: float | None = None
+    residual: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OofDiagnostics:
+    """Training-only display data; scalar metrics cover all OOF predictions."""
+
+    partition: str
+    sample_count: int
+    points: tuple[DiagnosticPoint, ...]
+    metrics: MetricBundle
+    roc_curve: tuple[tuple[float, float], ...]
+    pr_curve: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateResult:
     task: TaskType
     family: str
@@ -467,10 +489,13 @@ class CandidateResult:
     folds: tuple[FoldResult, ...]
     summary: tuple[MetricSummary, ...]
     total_seconds: float
+    run_config: RunConfig | None = None
+    diagnostics: OofDiagnostics | None = None
 
     @property
     def complete(self) -> bool:
         return (bool(self.expected_fold_indices)
+                and len(set(self.expected_fold_indices)) == len(self.expected_fold_indices)
                 and tuple(f.fold_index for f in self.folds) == self.expected_fold_indices
                 and all(f.status == "completed" and f.metrics is not None for f in self.folds))
 

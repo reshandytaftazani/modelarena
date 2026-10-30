@@ -157,6 +157,7 @@ def child_main(
             elif workload == "classical":
                 from dataclasses import asdict
                 from ml.training.classical_suite import SuiteCancelled, evaluate_classical_suite
+                from ml.training.cv import compare_candidates
 
                 context, run = classical_input
                 _emit(queue, PROGRESS, stage="fitting")
@@ -166,9 +167,15 @@ def child_main(
                     )
                 except SuiteCancelled:
                     return
+                comparison = compare_candidates(context, candidates)
                 result = {"pid": os.getpid(), "workload": "classical", "candidates": [
                     {**asdict(candidate), "eligible": candidate.eligible} for candidate in candidates
-                ]}
+                ], "comparison": {
+                    "ranked": [{"family": entry.candidate.family, "mean": entry.mean, "std": entry.std,
+                                "mean_fit_seconds": entry.mean_fit_seconds, "baseline_delta": entry.baseline_delta,
+                                "tied": entry.tied} for entry in comparison.ranked],
+                    "unranked": [candidate.family for candidate in comparison.unranked],
+                }}
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:

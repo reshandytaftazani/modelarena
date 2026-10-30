@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 10 classical suite](https://img.shields.io/badge/status-day_10_classical_suite-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 11 CV comparison](https://img.shields.io/badge/status-day_11_CV_comparison-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 10 verified locally:** all four classical families per task run on frozen training-only folds in a spawned, single-slot worker using internally prepared inputs. Cancellation, restart fencing and incomplete-candidate eligibility checks remain in place. Results are currently in memory only; durable tracking/publication, final evaluation locks and the full benchmark comparison remain planned.
+> **Day 11 CV comparison verified locally:** complete, compatible classical candidates are compared by their frozen-fold primary metric, with baseline deltas and bounded out-of-fold diagnostics. The spawned worker returns results in memory only; durable diagnostic storage and tracking/publication remain Day 12 work. Final evaluation locks and the full resource benchmark comparison also remain planned.
 
 ## Why ModelArena
 
@@ -91,12 +91,13 @@ Verified delivery as of **2026-10-30**:
 | Day 8 Windows-safe spawned worker | Committed | 336 tests passed, zero skips; real Windows children at T=2/4/6, no mocks; see [validation evidence](docs/VALIDATION.md#day-8--2026-10-26) |
 | Day 9 cancellation and restart reconciliation | Committed | 357 tests passed, zero skips; real native-fit cancellation, orphan blocking, fencing and retry; see [validation evidence](docs/VALIDATION.md#day-9--2026-10-27) |
 | Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
+| Day 11 CV comparison and diagnostics | Verified locally, durable diagnostics pending | 387 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-11--2026-10-30) |
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
 | G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Ten daily work packages are verified locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover the classical suite, training-only folds, durable queue, spawned worker, resource monitoring, cancellation and fail-closed recovery. Durable candidate publication, tracking and application usability require later acceptance checks.
+The Day 11 comparison and in-memory diagnostics are verified locally, but their durable publication remains pending; **G1 has passed locally; G2–G4 remain pending**. Current tests cover the classical suite, training-only folds, durable queue, spawned worker, resource monitoring, cancellation and fail-closed recovery. Durable candidate publication, tracking and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 

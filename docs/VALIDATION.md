@@ -1,5 +1,16 @@
 # Validation evidence
 
+## Day 11 — 2026-10-30
+
+The user requested Day 11, English output, commit and push. Work continued on `feat/day-7-durable-queue` from clean commit `4ea6dbe`. No dependency changes, downloads, holdout evaluations, or user data were added.
+
+- CV comparison verifies the frozen manifest, task, feature configuration, fold identities, primary metric/direction, model seed and resource configuration before mixing candidates. It recalculates fold means and population standard deviations from actual complete folds; failed, timed-out, duplicate or incomplete folds and undefined primary metrics remain unranked. Baseline deltas have positive-is-better direction, are null if Dummy is ineligible or absent, and ties within 1e-8 of a group's best use mean fit time and family name. Timing is separate from score.
+- Diagnostics aggregate outer-validation predictions only. Each displayed prediction retains its row and fold identity; full OOF scalar metrics/confusion matrix and classification ROC/PR curves or regression residual/prediction points are explicitly labeled training OOF. Display points and each curve are evenly sampled deterministically, capped by the frozen `max_diagnostic_points` setting (at most 2,000). Fold-mean ranking never uses pooled OOF metrics. Failed or incomplete candidates have no pooled diagnostics. These predictions and labels are private data and are not logged or committed.
+- The spawned child returns the comparison and diagnostics alongside candidates in the supervisor's in-memory result. **Durable persistence is not implemented:** the Day 11 persistence acceptance remains pending until Day 12's private MLflow/manifest and atomic-publication work. A completed job does not mean the data survives restart. The existing supervisor enforces the overall job deadline and discards timed-out job output; there is still no independently enforced per-fold native-fit deadline. No partial or timed-out candidate is promoted by the comparison function.
+- Test-first: the new CV protocol suite initially failed collection because the comparison interface did not exist; the worker integration then failed because comparison was absent from the child payload. Both passed after implementation. `uv run --locked pytest tests/integration/test_cv_protocol.py tests/integration/test_baseline_cv.py -q`: **32 passed**. `uv run --locked pytest tests/integration/test_classical_suite.py -q`: **7 passed**, including actual Windows spawned children for both tasks. `uv run --locked pytest -q`: **387 passed in 101.55 s**, zero skips. `uv lock --check` and `git diff --check` passed.
+
+G1 remains passed locally; G2–G4 remain pending. These fixture tests are not named demonstration, benchmark, final holdout or release evidence.
+
 ## Day 10 — 2026-10-30
 
 The user requested Day 10, English output, commit and push. Work continued on `feat/day-7-durable-queue`; the starting checkout was clean at `c33ffca`. No dependencies, lockfiles, user data, dataset downloads, holdout scoring or frontend work were added.
