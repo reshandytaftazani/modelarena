@@ -17,7 +17,9 @@ import sqlite3
 from typing import Iterator
 from uuid import uuid4
 
-from apps.api.database.schema import DELETION_INTENTS_SQL, SCHEMA_SQL, SCHEMA_VERSION, WORKER_PROCESSES_SQL
+from apps.api.database.schema import (DELETION_INTENTS_SQL, JOB_PROGRESS_SQL, SCHEMA_SQL, SCHEMA_VERSION,
+                                      SCOPE_LOCK_MARKERS_SQL, SCOPE_TOMBSTONES_SQL,
+                                      WORKER_PRESENCE_SQL, WORKER_PROCESSES_SQL)
 from apps.api.workers.monitor import process_liveness
 from apps.api.workers.control import check_safe_error, check_stage, check_state
 from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType, TrainingContext
@@ -184,7 +186,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -206,9 +208,23 @@ class JobRepository:
                 elif version == 1:
                     db.execute(WORKER_PROCESSES_SQL)
                     db.execute(DELETION_INTENTS_SQL)
+                    db.execute(WORKER_PRESENCE_SQL)
+                    db.execute(SCOPE_LOCK_MARKERS_SQL)
+                    db.execute(SCOPE_TOMBSTONES_SQL)
+                    db.execute(JOB_PROGRESS_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version == 2:
                     db.execute(DELETION_INTENTS_SQL)
+                    db.execute(WORKER_PRESENCE_SQL)
+                    db.execute(SCOPE_LOCK_MARKERS_SQL)
+                    db.execute(SCOPE_TOMBSTONES_SQL)
+                    db.execute(JOB_PROGRESS_SQL)
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 3:
+                    db.execute(WORKER_PRESENCE_SQL)
+                    db.execute(SCOPE_LOCK_MARKERS_SQL)
+                    db.execute(SCOPE_TOMBSTONES_SQL)
+                    db.execute(JOB_PROGRESS_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise ValueError("Unsupported metadata schema version")
@@ -463,6 +479,29 @@ class JobRepository:
             db.execute("UPDATE worker_lease SET heartbeat_at=? WHERE singleton=1 AND owner_token=?",
                        (now, owner.owner_token))
             return _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+
+    def record_work_progress(self, owner: WorkerIdentity, job_id: str, family: str, fold_index: int,
+                             finished_units: int, total_units: int) -> None:
+        """Persist bounded fold work counts only for the current fenced owner."""
+        if family not in {"dummy", "logistic", "ridge", "random_forest", "hist_gradient_boosting"}:
+            raise ValueError("Unsupported candidate family")
+        if (type(fold_index) is not int or type(finished_units) is not int or type(total_units) is not int
+                or total_units not in (8, 12, 16, 20) or not 0 <= fold_index < total_units // 4
+                or not 0 <= finished_units <= total_units):
+            raise ValueError("Invalid progress units")
+        with self._transaction() as db:
+            self._owned_running_row(db, owner, job_id)
+            old = db.execute("SELECT finished_units,total_units FROM job_progress WHERE job_id=?", (job_id,)).fetchone()
+            if old is not None and (finished_units < old[0] or total_units != old[1]):
+                raise ValueError("Progress cannot go backwards")
+            db.execute("INSERT INTO job_progress VALUES(?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET "
+                       "family=excluded.family,fold_index=excluded.fold_index,finished_units=excluded.finished_units, "
+                       "total_units=excluded.total_units", (job_id, family, fold_index, finished_units, total_units))
+
+    def get_work_progress(self, job_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute("SELECT family,fold_index,finished_units,total_units FROM job_progress WHERE job_id=?", (job_id,)).fetchone()
+        return dict(row) if row is not None else None
 
     def record_progress(self, owner: WorkerIdentity, job_id: str, stage: str) -> JobRecord:
         """Persist one allowlisted stage; free text can never reach the database."""

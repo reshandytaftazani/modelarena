@@ -115,8 +115,16 @@ def test_upload_configure_queue_and_cancel_without_training_in_api(tmp_path):
         job_id = queued.json()['job_id']
         assert queued.json()['state'] == 'queued'
         assert client.post(f'/api/v1/experiments/{experiment_id}/jobs', json={'idempotency_key': 'once'}).json()['job_id'] == job_id
+        other = client.post('/api/v1/experiments', json={'configuration_id': configuration_id, 'primary_metric': 'mae'})
+        assert other.status_code == 201
+        assert client.post(f"/api/v1/experiments/{other.json()['experiment_id']}/jobs", json={'idempotency_key': 'once'}).status_code == 409
+        assert client.post(f'/api/v1/experiments/{experiment_id}/jobs', content=b' ' * 65537).status_code == 413
         assert client.get(f'/api/v1/jobs/{job_id}').json()['state'] == 'queued'
         assert client.post(f'/api/v1/jobs/{job_id}/cancel').json()['state'] == 'cancelled'
+        retried = client.post(f'/api/v1/jobs/{job_id}/retry', json={'idempotency_key': 'retry-once'})
+        assert retried.status_code == 202
+        assert retried.json()['job_id'] != job_id and retried.json()['state'] == 'queued'
+        assert client.post(f'/api/v1/jobs/{job_id}/retry', json={'idempotency_key': 'retry-once'}).json()['job_id'] == retried.json()['job_id']
 
 
 def test_configuration_rejects_bad_targets_and_unknown_datasets(tmp_path):
@@ -143,7 +151,12 @@ def test_queued_upload_can_be_loaded_by_separate_worker_after_reopening_store(tm
         worker = WorkerSupervisor(JobRepository(repo.path), workload='classical', load_from_storage=True,
                                   heartbeat_seconds=0.2, sample_seconds=0.1, poll_seconds=0.05)
         assert worker.run_once().state == 'completed'
-        assert client.get(f'/api/v1/jobs/{job_id}').json()['state'] == 'completed'
+        job_response = client.get(f'/api/v1/jobs/{job_id}').json()
+        assert job_response['state'] == 'completed'
+        assert job_response['progress']['finished_units'] == 20
+        assert job_response['progress']['total_units'] == 20
+        assert job_response['progress']['family'] == 'hist_gradient_boosting'
+        assert job_response['progress']['fold_index'] == 4
         ranking = client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').json()
         assert ranking['job_id'] == job_id and len(ranking['ranked']) == 4
         candidate = client.get(f"/api/v1/candidates/{ranking['ranked'][0]['candidate_id']}")
@@ -157,6 +170,9 @@ def test_queued_upload_can_be_loaded_by_separate_worker_after_reopening_store(tm
         assert deletion.status_code == 202 and deletion.json()['state'] == 'deletion_pending'
         assert not (tmp_path / 'results' / attempt_id).exists()
         assert (tmp_path / 'mlflow.sqlite3').exists()  # still not confirmed deleted
+        assert client.get(f'/api/v1/configurations/{config_id}/profile').status_code == 409
+        assert client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').status_code == 409
+        assert client.get(f"/api/v1/candidates/{ranking['ranked'][0]['candidate_id']}").status_code == 409
 
 
 def test_worker_rejects_source_replaced_after_queue(tmp_path):

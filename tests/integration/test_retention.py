@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 from fastapi.testclient import TestClient
+import pytest
 
 from apps.api.database.repository import ConflictError, JobRepository
 from apps.api.main import create_app
@@ -27,6 +28,11 @@ def test_active_references_prevent_deletion_then_intent_blocks_new_work(tmp_path
     with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
                     headers={'X-ModelArena-Token': TOKEN}) as client:
         dataset_id, experiment_id, csv = prepared(client)
+        disclosure = client.get(f'/api/v1/datasets/{dataset_id}/deletion-disclosure')
+        assert disclosure.status_code == 200
+        assert disclosure.json()['linked_experiments'] >= 1
+        assert disclosure.json()['confirmed_deletion_supported'] is False
+        assert 'scope_hmac' not in disclosure.text
         job = client.post(f'/api/v1/experiments/{experiment_id}/jobs', json={'idempotency_key': 'one'}).json()['job_id']
         assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 409
         assert (tmp_path / 'uploads' / dataset_id / 'source.csv').exists()
@@ -65,8 +71,25 @@ def test_schema_v2_migrates_with_existing_datasets(tmp_path):
         db.execute('PRAGMA user_version=2')
     migrated = JobRepository(repo.path)
     with migrated._connection() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
         assert db.execute("SELECT name FROM sqlite_master WHERE name='deletion_intents'").fetchone()
+
+
+def test_schema_v3_migrates_without_losing_existing_dataset(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, _ = prepared(client)
+    with repo._connection() as db:
+        db.execute('DROP TABLE worker_presence')
+        db.execute('DROP TABLE scope_lock_markers')
+        db.execute('DROP TABLE scope_tombstones')
+        db.execute('PRAGMA user_version=3')
+    migrated = JobRepository(repo.path)
+    with migrated._connection() as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert db.execute('SELECT 1 FROM datasets WHERE dataset_id=?', (dataset_id,)).fetchone()
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name IN ('worker_presence','scope_lock_markers','scope_tombstones')").fetchone()[0] == 3
 
 
 def test_enqueue_and_deletion_are_arbitrated_in_one_database_transaction(tmp_path):
@@ -93,3 +116,92 @@ def test_enqueue_and_deletion_are_arbitrated_in_one_database_transaction(tmp_pat
     with ThreadPoolExecutor(max_workers=2) as pool:
         a, b = pool.submit(enqueue), pool.submit(delete)
         assert (a.result(), b.result()) in {('queued', 'conflict'), ('conflict', 'deletion_pending')}
+
+
+def test_consumed_scope_creates_minimal_keyed_tombstone_before_file_purge(tmp_path):
+    from apps.api.services.retention import find_tombstone
+    from ml.data.csv_io import validate_csv
+    from ml.contracts import ResourceLimits
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, csv = prepared(client)
+        with repo._connection() as db:
+            scope = db.execute('SELECT scope_id,canonical_sha256,target,task FROM evaluation_scopes').fetchone()
+            db.execute("INSERT INTO scope_lock_markers(scope_id,state) VALUES(?, 'consumed')", (scope['scope_id'],))
+        response = client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True})
+        assert response.status_code == 202 and response.json()['state'] == 'deletion_pending'
+        alternate = tmp_path / 'equivalent.csv'
+        alternate.write_bytes(csv.replace(b'\n', b'\r\n'))
+        identity = validate_csv(alternate, ResourceLimits()).canonical_sha256
+        assert identity == scope['canonical_sha256']
+        assert find_tombstone(repo, identity, scope['target'], scope['task']) == 'consumed'
+        with repo._connection() as db:
+            row = dict(db.execute('SELECT * FROM scope_tombstones').fetchone())
+        assert set(row) == {'scope_hmac', 'version', 'state'}
+        assert row['state'] == 'consumed' and scope['target'] not in row['scope_hmac']
+        assert row['scope_hmac'] != identity
+
+
+def test_unreserved_deletion_creates_no_tombstone_or_key(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, _ = prepared(client)
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
+    with repo._connection() as db:
+        assert db.execute('SELECT count(*) FROM scope_tombstones').fetchone()[0] == 0
+    assert not (tmp_path / 'scope-tombstone.key').exists()
+
+
+def test_lost_tombstone_key_blocks_lookup_without_replacing_key(tmp_path):
+    from apps.api.services.retention import find_tombstone
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, _ = prepared(client)
+        with repo._connection() as db:
+            scope = db.execute('SELECT scope_id,canonical_sha256,target,task FROM evaluation_scopes').fetchone()
+            db.execute("INSERT INTO scope_lock_markers VALUES(?, 'reserved')", (scope['scope_id'],))
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
+    key = tmp_path / 'scope-tombstone.key'
+    key.unlink()
+    with pytest.raises(RuntimeError, match='unavailable'):
+        find_tombstone(repo, scope['canonical_sha256'], scope['target'], scope['task'])
+    assert not key.exists()
+
+
+def test_consumed_tombstone_never_downgrades_on_retry(tmp_path):
+    from apps.api.services.retention import find_tombstone
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, _ = prepared(client)
+        with repo._connection() as db:
+            scope = db.execute('SELECT scope_id,canonical_sha256,target,task FROM evaluation_scopes').fetchone()
+            db.execute("INSERT INTO scope_lock_markers VALUES(?, 'consumed')", (scope['scope_id'],))
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
+        with repo._connection() as db:
+            db.execute("UPDATE scope_lock_markers SET state='reserved' WHERE scope_id=?", (scope['scope_id'],))
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
+        assert find_tombstone(repo, scope['canonical_sha256'], scope['target'], scope['task']) == 'consumed'
+
+
+def test_known_private_partition_split_final_and_report_copies_are_removed(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, experiment_id, _ = prepared(client)
+        with repo._connection() as db:
+            scope_id, split_id = db.execute('SELECT scope_id,split_id FROM configurations WHERE dataset_id=?', (dataset_id,)).fetchone()
+        paths = [tmp_path / 'datasets' / scope_id / 'train.csv',
+                 tmp_path / 'datasets' / scope_id / 'holdout.csv',
+                 tmp_path / 'splits' / f'{split_id}.json',
+                 tmp_path / 'final' / scope_id / 'model.bin',
+                 tmp_path / 'reports' / f'{experiment_id}.zip']
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'private fixture')
+        response = client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True})
+        assert response.status_code == 202 and not response.json()['file_cleanup_failed']
+        assert all(not path.exists() for path in paths)

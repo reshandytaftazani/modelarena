@@ -134,7 +134,8 @@ def compare_candidates(context: TrainingContext, candidates: tuple[CandidateResu
 
 
 def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
-                       cancelled: Callable[[], bool] = lambda: False) -> CandidateResult:
+                       cancelled: Callable[[], bool] = lambda: False,
+                       on_fold: Callable[[int, bool], None] = lambda _index, _finished: None) -> CandidateResult:
     """Fit a fresh guarded preprocessor and estimator on each outer-fit set."""
     started = perf_counter()
     if not isinstance(context, TrainingContext) or not isinstance(config, RunConfig):
@@ -159,6 +160,7 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                 # into a failed fold or publish a partial candidate.
                 from ml.training.classical_suite import SuiteCancelled
                 raise SuiteCancelled()
+            on_fold(frozen.fold_index, False)
             fit_seconds = score_seconds = 0.0
             stage_started = perf_counter()
             scoring = False
@@ -204,6 +206,7 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
             finally:
                 # Do not retain previous fold matrices while allocating the next.
                 encoded_fit = encoded_validation = model = preprocessor = None
+            on_fold(frozen.fold_index, True)
     result = CandidateResult(task, config.family, config.model_seed, split.manifest_sha256,
                              primary, direction, tuple(f.fold_index for f in split.folds),
                              tuple(folds), (), perf_counter() - started, config)

@@ -39,7 +39,7 @@ def test_metadata_and_jobs_survive_reopen_without_raw_records(setup):
     reopened = JobRepository(repo.path)
     assert reopened.get_job(job.job_id) == job
     with sqlite3.connect(repo.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert db.execute("SELECT count(*) FROM datasets").fetchone()[0] == 1
         saved = json.loads(db.execute("SELECT config_json FROM configurations").fetchone()[0])
@@ -49,6 +49,22 @@ def test_metadata_and_jobs_survive_reopen_without_raw_records(setup):
         assert db.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
         assert not {"rows", "targets"} & saved.keys()
         assert db.execute("SELECT event FROM audit_events ORDER BY sequence").fetchall()[-1] == ("job_enqueued",)
+
+
+def test_fold_progress_is_bounded_monotone_and_fenced(setup):
+    repo, prepared = setup
+    job = repo.enqueue_cv(prepared.experiment_id, "progress")
+    owner = WorkerIdentity("real-owner", repo.lease_generation())
+    repo.claim_next(owner)
+    repo.record_work_progress(owner, job.job_id, "dummy", 0, 0, 20)
+    repo.record_work_progress(owner, job.job_id, "dummy", 0, 1, 20)
+    assert JobRepository(repo.path).get_work_progress(job.job_id)["finished_units"] == 1
+    with pytest.raises(ValueError):
+        repo.record_work_progress(owner, job.job_id, "dummy", 0, 0, 20)
+    with pytest.raises(ValueError):
+        repo.record_work_progress(owner, job.job_id, "../../private", 0, 2, 20)
+    with pytest.raises(ConflictError):
+        repo.record_work_progress(WorkerIdentity("stale-owner", owner.generation), job.job_id, "dummy", 1, 2, 20)
 
 
 def test_idempotency_reuses_job_even_after_reopen_and_full_queue(setup, tmp_path):

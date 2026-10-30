@@ -361,6 +361,13 @@ class WorkerSupervisor:
                     if reported != stage:
                         self.repository.record_progress(self.owner, job.job_id, reported)
                         stage = reported
+                    if "family" in message:
+                        try:
+                            self.repository.record_work_progress(self.owner, job.job_id, message.get("family"),
+                                                                 message.get("fold_index"), message.get("finished_units"),
+                                                                 message.get("total_units"))
+                        except ValueError:
+                            logger.warning("Ignored invalid worker progress for job %s", job.job_id)
                 elif message.get("kind") == "result":
                     payload = message.get("payload")
                     if isinstance(payload, dict):

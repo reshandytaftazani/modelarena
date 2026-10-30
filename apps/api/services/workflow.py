@@ -30,11 +30,16 @@ def configure(repository: JobRepository, dataset_id: str, config: DatasetConfig,
 
 def configuration(repository: JobRepository, configuration_id: str) -> dict:
     with repository._connection() as db:
-        row = db.execute("SELECT c.dataset_id,c.config_json,c.profile_json,s.manifest_json "
-                         "FROM configurations c JOIN splits s ON s.split_id=c.split_id WHERE c.configuration_id=?",
+        row = db.execute("SELECT c.dataset_id,c.config_json,c.profile_json,s.manifest_json, "
+                         "EXISTS(SELECT 1 FROM datasets d2 JOIN deletion_intents i ON i.dataset_id=d2.dataset_id "
+                         "WHERE d2.canonical_sha256=d.canonical_sha256) AS pending "
+                         "FROM configurations c JOIN splits s ON s.split_id=c.split_id "
+                         "JOIN datasets d ON d.dataset_id=c.dataset_id WHERE c.configuration_id=?",
                          (configuration_id,)).fetchone()
     if row is None:
         raise NotFoundError("Configuration not found")
+    if row["pending"]:
+        raise ConflictError("Dataset deletion is pending")
     return {"dataset_id": row["dataset_id"], "config": parse_config(json.loads(row["config_json"])),
             "profile": json.loads(row["profile_json"]), "split_seed": json.loads(row["manifest_json"])["split_seed"]}
 

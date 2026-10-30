@@ -1,6 +1,40 @@
 """Application schema and additive worker-identity migration, applied explicitly."""
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+WORKER_PRESENCE_SQL = """
+CREATE TABLE IF NOT EXISTS worker_presence (
+    owner_token TEXT PRIMARY KEY,
+    pid INTEGER NOT NULL,
+    process_created REAL NOT NULL,
+    heartbeat_at TEXT NOT NULL
+);
+"""
+
+# A marker is only a retention-side contract. Finalization must create/update it
+# in the same transaction as its own durable reservation/start event.
+SCOPE_LOCK_MARKERS_SQL = """
+CREATE TABLE IF NOT EXISTS scope_lock_markers (
+    scope_id TEXT PRIMARY KEY REFERENCES evaluation_scopes(scope_id),
+    state TEXT NOT NULL CHECK(state IN ('reserved','consumed'))
+);
+"""
+SCOPE_TOMBSTONES_SQL = """
+CREATE TABLE IF NOT EXISTS scope_tombstones (
+    scope_hmac TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK(version=1),
+    state TEXT NOT NULL CHECK(state IN ('reserved','consumed'))
+);
+"""
+JOB_PROGRESS_SQL = """
+CREATE TABLE IF NOT EXISTS job_progress (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
+    family TEXT NOT NULL,
+    fold_index INTEGER NOT NULL,
+    finished_units INTEGER NOT NULL,
+    total_units INTEGER NOT NULL
+);
+"""
 
 DELETION_INTENTS_SQL = """
 CREATE TABLE IF NOT EXISTS deletion_intents (
@@ -133,3 +167,7 @@ BEGIN SELECT RAISE(ABORT, 'metadata is immutable'); END;
 
 SCHEMA_SQL += WORKER_PROCESSES_SQL
 SCHEMA_SQL += DELETION_INTENTS_SQL
+SCHEMA_SQL += WORKER_PRESENCE_SQL
+SCHEMA_SQL += SCOPE_LOCK_MARKERS_SQL
+SCHEMA_SQL += SCOPE_TOMBSTONES_SQL
+SCHEMA_SQL += JOB_PROGRESS_SQL

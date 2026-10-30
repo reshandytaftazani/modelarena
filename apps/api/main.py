@@ -1,7 +1,6 @@
 """Restricted local transport for persisted job state and CV comparisons.
 
-This factory does not start a server or worker. Configuration, queueing and
-deletion endpoints are not yet implemented.
+This factory does not start a server or worker. Deletion remains incomplete.
 """
 
 from dataclasses import asdict
@@ -20,9 +19,17 @@ from apps.api.database.repository import ConflictError, JobRecord, JobRepository
 from apps.api.services.leaderboard import get_candidate, get_leaderboard
 from apps.api.services.datasets import MultipartUpload, UploadError, publish_upload, upload_root
 from apps.api.services.workflow import configuration, configure, create_experiment
-from apps.api.services.retention import request_deletion
+from apps.api.services.retention import deletion_disclosure, request_deletion
+from apps.api.workers.presence import worker_status
 from ml.contracts import DatasetConfig, FeatureColumn, FeatureSchema, FeatureType, ResourceLimits, TaskType
 from ml.data.validation import CsvValidationError
+
+
+class WorkProgress(BaseModel):
+    family: str
+    fold_index: int
+    finished_units: int
+    total_units: int
 
 
 class JobResponse(BaseModel):
@@ -36,6 +43,7 @@ class JobResponse(BaseModel):
     updated_at: str
     heartbeat_at: str | None
     safe_error: str | None
+    progress: WorkProgress | None = None
 
 
 class DatasetResponse(BaseModel):
@@ -92,8 +100,8 @@ async def _body(request: Request, schema: type[BaseModel]) -> BaseModel:
         raise UploadError("invalid_request") from None
 
 
-def _job(record: JobRecord) -> JobResponse:
-    return JobResponse.model_validate(asdict(record))
+def _job(repository: JobRepository, record: JobRecord) -> JobResponse:
+    return JobResponse.model_validate({**asdict(record), "progress": repository.get_work_progress(record.job_id)})
 
 
 def _error(status: int, code: str) -> JSONResponse:
@@ -181,6 +189,10 @@ def create_app(repository: JobRepository, *, session_token: str,
     async def invalid_csv(_request: Request, exc: CsvValidationError):
         return _error(413 if exc.code == "upload_too_large" else 422, exc.code)
 
+    @app.get("/health")
+    def health():
+        return {"api_version": "v1", "storage": "available", "worker": worker_status(repository)}
+
     @app.post("/api/v1/datasets", response_model=DatasetResponse, status_code=201)
     async def upload_dataset(request: Request):
         upload = None
@@ -207,6 +219,10 @@ def create_app(repository: JobRepository, *, session_token: str,
         if not body.acknowledge:
             return _error(422, "acknowledgement_required")
         return await run_in_threadpool(request_deletion, repository, _opaque_id(dataset_id))
+
+    @app.get("/api/v1/datasets/{dataset_id}/deletion-disclosure")
+    def get_deletion_disclosure(dataset_id: str):
+        return deletion_disclosure(repository, _opaque_id(dataset_id))
 
     @app.post("/api/v1/datasets/{dataset_id}/configurations", status_code=201)
     async def create_configuration(dataset_id: str, request: Request):
@@ -243,11 +259,12 @@ def create_app(repository: JobRepository, *, session_token: str,
         body = await _body(request, QueueInput)
         if not body.idempotency_key.strip():
             return _error(422, "invalid_request")
-        return _job(await run_in_threadpool(repository.enqueue_cv, _opaque_id(experiment_id), body.idempotency_key))
+        job = await run_in_threadpool(repository.enqueue_cv, _opaque_id(experiment_id), body.idempotency_key)
+        return await run_in_threadpool(_job, repository, job)
 
     @app.get("/api/v1/jobs/{job_id}", response_model=JobResponse)
     def get_job(job_id: str):
-        return _job(repository.get_job(_opaque_id(job_id)))
+        return _job(repository, repository.get_job(_opaque_id(job_id)))
 
     @app.post("/api/v1/jobs/{job_id}/cancel", response_model=JobResponse)
     async def cancel_job(job_id: str, request: Request):
@@ -258,7 +275,16 @@ def create_app(repository: JobRepository, *, session_token: str,
                 return _error(413, "body_too_large")
         if size:
             return _error(422, "unexpected_body")
-        return _job(await run_in_threadpool(repository.request_cancel, _opaque_id(job_id)))
+        job = await run_in_threadpool(repository.request_cancel, _opaque_id(job_id))
+        return await run_in_threadpool(_job, repository, job)
+
+    @app.post("/api/v1/jobs/{job_id}/retry", response_model=JobResponse, status_code=202)
+    async def retry_job(job_id: str, request: Request):
+        body = await _body(request, QueueInput)
+        if not body.idempotency_key.strip():
+            return _error(422, "invalid_request")
+        job = await run_in_threadpool(repository.retry_cv, _opaque_id(job_id), body.idempotency_key)
+        return await run_in_threadpool(_job, repository, job)
 
     @app.get("/api/v1/experiments/{experiment_id}/leaderboard")
     def leaderboard(experiment_id: str):
