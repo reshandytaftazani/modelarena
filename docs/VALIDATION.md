@@ -1,5 +1,33 @@
 # Validation evidence
 
+## Day 14 core acceptance and Milestone G2 — 2026-10-31
+
+The user requested execution of Day 14 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 14 deliverables are complete and verified locally; Milestone G2 (Classical reliable experiments) is passed.
+
+- **D14a Holdout Gate and Immutable Reservation:**
+  - Implemented immutable `FrozenSelection` reservation and unique evaluation scope locking in `apps/api/database/repository.py` and `apps/api/services/finalization.py`.
+  - Scope locking enforces `scope_id = sha256(canonical_sha256 + target_column + task)`. A unique constraint on `(canonical_sha256, target_column, task)` ensures any competing experiment on equivalent canonical data with identical target and task cannot trigger duplicate holdout evaluations. Concurrent reservation requests serialize to a single winner; differing candidate contenders are denied with `ConflictError`.
+  - Candidate digest verification binds `sha256(experiment_id + candidate_id + config_sha256 + split_manifest_digest + metric)`. Altered configs, modified split manifests, or differing candidate metrics are rejected. Unrankable or incomplete candidates (failed status or null primary metric) are rejected before reservation.
+  - Durable pre-evaluation retry requires verified worker child termination and unconsumed evaluation-start state. If a failure occurs before evaluation-start, retry is permitted only for the exact same selection.
+  - Fail-closed evaluation-start boundary: `start_evaluation` atomically commits `evaluation_started_at`, updates state to `evaluating`, updates `scope_lock_markers` to `consumed`, and returns a single-use authentication token. After evaluation has started, any subsequent retry attempt is permanently banned (`EvaluationAlreadyStartedError`).
+  - `HoldoutCapability` token guard: capability issuance requires the private token returned by `start_evaluation`. Empty or invalid tokens raise `ValueError`.
+  - Day 13 scope-lock marker and keyed tombstone integration: reservation checks existing `scope_lock_markers` and `scope_tombstones`. Scopes previously marked `consumed` or present in tombstones reject reservation immediately (`HoldoutAlreadyConsumedError`).
+  - Schema v5 migration: additive `finalizations` table with `finalizations_immutable_selection` trigger, `jobs.kind` CHECK constraint allowing `('cv', 'finalization')`, and separate worker claim filter ensuring classical supervisors claim only `kind="cv"`.
+  - Verified with 10 integration tests in `tests/integration/test_holdout_gate.py`: **10 passed in 100.80 s**.
+
+- **D14b Milestone G2 Acceptance:**
+  - Full suite rerun: `uv run pytest tests/unit tests/integration -q` passed **446 tests in 279.68 s (0:04:39)**, zero skips, with two expected upstream deprecation warnings (Starlette `TestClient` and MLflow `SQLAlchemyStore`).
+  - All G2 exit criteria are met:
+    - Real Windows worker lifecycle, process monitoring, heartbeat, cancellation during native fitting, orphan reconciliation and restart recovery (Days 8–9).
+    - All classical candidate estimators (Dummy, LogisticRegression/Ridge, RandomForest, HistGradientBoosting) verified across both classification and regression tasks on frozen CV folds (Days 10–11).
+    - Local SQLite MLflow tracking with checksum-verified manifests, metrics, fold diagnostics, and atomic candidate publication (Day 12).
+    - CV ranking by primary metric, tie-breaking, baseline comparison, and holdout-isolated API & retention boundaries (Day 13).
+    - Durable finalization reservation gate, candidate digest verification, evaluation scope locking, dead-child verified retries, and post-start lock protection (Day 14).
+  - **Limitations Recorded:**
+    - Model refit on full training set and real holdout scoring remain scheduled for Day 18 and Day 19; D14a verification uses a fixture evaluator.
+    - PyTorch CPU MLP architecture, fold-local early stopping, and loss curve artifacts remain scheduled for Days 15–17.
+    - Complete cross-store deletion (permanent MLflow run purging and UI integration) remains scheduled for Day 25.
+
 ## Day 13 core acceptance — 2026-10-30
 
 The user requested completion of Day 13. The daily backend API and deletion-core work is verified locally; **this is not verification of finalization, confirmed deletion or a product release**. Day 14 owns the real finalization gate, and Day 25 owns permanent MLflow/metadata cleanup and deletion UI.

@@ -512,3 +512,70 @@ class CandidateResult:
             if value is None or not math.isfinite(value):
                 return False
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSelection:
+    finalization_id: str
+    scope_id: str
+    experiment_id: str
+    candidate_id: str
+    candidate_digest: str
+    family: str
+    task: TaskType
+    primary_metric: str
+    primary_score: float
+    direction: str
+    split_sha256: str
+    config_sha256: str
+    model_seed: int
+    resource_limits: ResourceLimits
+    created_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.finalization_id, str) or not self.finalization_id:
+            raise ValueError("Finalization ID required")
+        if not isinstance(self.scope_id, str) or not self.scope_id:
+            raise ValueError("Scope ID required")
+        if not isinstance(self.candidate_id, str) or not self.candidate_id:
+            raise ValueError("Candidate ID required")
+        if not isinstance(self.candidate_digest, str) or len(self.candidate_digest) != 64:
+            raise ValueError("Valid 64-character candidate digest required")
+        if not isinstance(self.task, TaskType):
+            raise ValueError("TaskType required")
+        if not math.isfinite(self.primary_score):
+            raise ValueError("Primary score must be finite")
+        if self.direction not in ("maximize", "minimize"):
+            raise ValueError("Direction must be maximize or minimize")
+        if not isinstance(self.resource_limits, ResourceLimits):
+            raise ValueError("ResourceLimits required")
+
+
+_CAPABILITY_TOKEN_MIN_LEN = 32
+
+
+@dataclass(frozen=True, slots=True)
+class HoldoutCapability:
+    scope_id: str
+    holdout_path: str
+    _auth_token: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope_id, str) or not self.scope_id:
+            raise ValueError("Scope ID required")
+        if not isinstance(self.holdout_path, str) or not self.holdout_path:
+            raise ValueError("Holdout path required")
+        if not isinstance(self._auth_token, str) or len(self._auth_token) < _CAPABILITY_TOKEN_MIN_LEN:
+            raise PermissionError("HoldoutCapability cannot be instantiated without a valid authorization token")
+
+
+@dataclass(frozen=True, slots=True)
+class FinalResult:
+    finalization_id: str
+    scope_id: str
+    candidate_id: str
+    task: TaskType
+    primary_metric: str
+    metrics: MetricBundle
+    evaluation_seconds: float
+    evaluated_at: str

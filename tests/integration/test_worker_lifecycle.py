@@ -219,7 +219,7 @@ def test_version_one_metadata_migrates_without_losing_queued_jobs(tmp_path):
     assert migrated.get_job(job.job_id).state == "queued"
     assert _supervisor(migrated).run_once().state == "completed"
     with sqlite3.connect(repo.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def native_fit_child(job_id, attempt_id, limits, workload, options, messages, cancel_event, start_event):

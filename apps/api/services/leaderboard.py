@@ -98,7 +98,7 @@ def get_leaderboard(repository: JobRepository, experiment_id: str) -> Leaderboar
 def get_candidate(repository: JobRepository, candidate_id: str) -> dict:
     """Return only the named candidate's CV data from a verified bundle."""
     with repository._connection() as db:
-        row = db.execute("SELECT c.job_id,c.family,c.experiment_id FROM candidates c JOIN jobs j ON j.job_id=c.job_id "
+        row = db.execute("SELECT c.job_id,c.family,c.experiment_id,c.config_sha256 FROM candidates c JOIN jobs j ON j.job_id=c.job_id "
                          "WHERE c.candidate_id=? AND j.state='completed'", (candidate_id,)).fetchone()
     if row is None:
         raise NotFoundError("Candidate not found")
@@ -112,4 +112,4 @@ def get_candidate(repository: JobRepository, candidate_id: str) -> dict:
     if len(matches) != 1:
         raise ValueError("Published candidate does not match metadata")
     _ensure_available(repository, row["experiment_id"])
-    return {"candidate_id": candidate_id, **matches[0]}
+    return {"candidate_id": candidate_id, "config_sha256": row["config_sha256"], **matches[0]}

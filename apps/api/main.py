@@ -23,6 +23,7 @@ from apps.api.services.leaderboard import Leaderboard, get_candidate, get_leader
 from apps.api.services.datasets import MultipartUpload, UploadError, publish_upload, upload_root
 from apps.api.services.workflow import configuration, configure, create_experiment
 from apps.api.services.retention import deletion_disclosure, request_deletion
+from apps.api.services.finalization import get_finalization_status, reserve, retry
 from apps.api.workers.presence import worker_status
 from apps.api.security import RequestContextMiddleware, error_response
 from ml.contracts import (DatasetConfig, DatasetProfile, FeatureColumn, FeatureSchema, FeatureType,
@@ -85,6 +86,7 @@ class CandidateResponse(BaseModel):
     run_config: RunConfig | None
     diagnostics: OofDiagnostics | None
     eligible: bool
+    config_sha256: str | None = None
 
 
 class DeletionResponse(BaseModel):
@@ -102,6 +104,52 @@ class DeletionDisclosure(BaseModel):
     confirmed_deletion_supported: bool
     disclosure: str
 
+
+
+class FinalizationResponse(BaseModel):
+    finalization_id: str
+    scope_id: str
+    experiment_id: str
+    candidate_id: str
+    candidate_digest: str
+    state: str
+    primary_metric: str
+    primary_score: float
+    direction: str
+    created_at: str
+    job_id: str | None = None
+
+
+class FinalizationAuditEntry(BaseModel):
+    occurred_at: str
+    actor: str
+    event: str
+
+
+class FinalizationStatusResponse(BaseModel):
+    scope_id: str
+    state: str
+    finalization_id: str | None = None
+    experiment_id: str | None = None
+    candidate_id: str | None = None
+    candidate_digest: str | None = None
+    job_id: str | None = None
+    evaluation_started_at: str | None = None
+    audit: list[FinalizationAuditEntry] = []
+    result: dict | None = None
+
+
+class FinalizationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str = Field(min_length=1, max_length=36)
+    expected_digest: str = Field(min_length=64, max_length=64)
+    acknowledge: bool = Field(strict=True)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class FinalizationRetryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 class HealthResponse(BaseModel):
     api_version: Literal["v1"]
@@ -365,5 +413,49 @@ def create_app(repository: JobRepository, *, session_token: str,
     @app.get("/api/v1/candidates/{candidate_id}", response_model=CandidateResponse)
     def candidate(candidate_id: str):
         return get_candidate(repository, _opaque_id(candidate_id))
+
+
+    @app.post("/api/v1/experiments/{experiment_id}/finalization", response_model=FinalizationResponse, status_code=202)
+    async def reserve_finalization_route(experiment_id: str, request: Request):
+        experiment_id = _opaque_id(experiment_id)
+        body = await _body(request, FinalizationInput)
+        if not body.acknowledge:
+            return _error(422, "acknowledgement_required")
+        try:
+            selection, job = await run_in_threadpool(
+                reserve, repository, experiment_id, body.candidate_id, body.expected_digest, body.acknowledge, body.idempotency_key
+            )
+            with repository._connection() as db:
+                fin = db.execute("SELECT state FROM finalizations WHERE finalization_id=?", (selection.finalization_id,)).fetchone()
+            return FinalizationResponse(
+                finalization_id=selection.finalization_id,
+                scope_id=selection.scope_id,
+                experiment_id=selection.experiment_id,
+                candidate_id=selection.candidate_id,
+                candidate_digest=selection.candidate_digest,
+                state=fin["state"] if fin else "reserved",
+                primary_metric=selection.primary_metric,
+                primary_score=selection.primary_score,
+                direction=selection.direction,
+                created_at=selection.created_at,
+                job_id=job.job_id if job else None,
+            )
+        except ValueError as exc:
+            if isinstance(exc, (ConflictError, CsvValidationError)):
+                raise
+            return _error(422, "invalid_finalization_request")
+
+    @app.get("/api/v1/experiments/{experiment_id}/finalization", response_model=FinalizationStatusResponse)
+    def get_finalization_route(experiment_id: str):
+        return get_finalization_status(repository, _opaque_id(experiment_id))
+
+    @app.post("/api/v1/experiments/{experiment_id}/finalization/retry", response_model=JobResponse, status_code=202)
+    async def retry_finalization_route(experiment_id: str, request: Request):
+        experiment_id = _opaque_id(experiment_id)
+        body = await _body(request, FinalizationRetryInput)
+        if not body.idempotency_key.strip():
+            return _error(422, "invalid_request")
+        job = await run_in_threadpool(retry, repository, experiment_id, body.idempotency_key)
+        return await run_in_threadpool(_job, repository, job)
 
     return app

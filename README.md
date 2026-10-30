@@ -2,13 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 12 local tracking](https://img.shields.io/badge/status-day_12_local_tracking-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 14 G2 passed](https://img.shields.io/badge/status-day_14_g2_passed-16a34a?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 12 local tracking verified:** classical CV results and bounded out-of-fold diagnostics are privately persisted with checksums, a manifest and local MLflow runs. Final evaluation locks, the dashboard and the full resource benchmark comparison remain planned.
-
-> **Day 13 core verified:** the local API supports CSV upload, configuration, CV queueing, job monitoring and CV inspection, with explicit server and worker entrypoints. The deletion core is fail-closed; confirmed deletion and finalization-lock integration remain scheduled for Days 25 and 14 respectively. This is not yet a complete end-to-end product.
+> **Day 14 & Milestone G2 verified:** immutable finalization reservation, candidate digest validation, unique evaluation scope locking, dead-child verified retries, durable evaluation-start gate, and holdout tombstone checks are verified locally. Milestone G2 (Classical reliable experiments) is passed with 446 unit and integration tests passing. Real full-training refit and true holdout scoring remain scheduled for Days 18–19.
 
 ## Why ModelArena
 
@@ -97,11 +95,12 @@ Verified delivery as of **2026-10-30**:
 | Day 12 local MLflow and atomic publication | Verified locally | 394 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-12--2026-10-30) |
 | Day 13 backend workflow and deletion core | Verified locally, with later integration pending | API acceptance and deletion-core tests pass; tombstone reupload uses simulated future cleanup; confirmed deletion and finalization integration remain pending. See [validation evidence](docs/VALIDATION.md#day-13-core-acceptance--2026-10-30) |
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
-| G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
+| Day 14 guarded finalization reservation and G2 | Verified locally | 446 tests passed, zero skips; holdout reservation lock, candidate digest validation, dead-child check, post-start evaluation lock, tombstone checks; see [validation evidence](docs/VALIDATION.md#day-14-core-acceptance-and-milestone-g2--2026-10-31) |
+| G2 — Classical experiments | Gate passed locally | Full classical suite, Windows worker recovery/cancel, MLflow tracking, candidate ranking, and durable holdout gate |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical CV results are now durably published and tracked locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation and fail-closed recovery. Finalization, complete deletion and application usability require later acceptance checks.
+Classical CV results and guarded finalization reservation are now durably tracked locally; **G1 and G2 have passed locally; G3–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation, fail-closed recovery, and holdout gate reservation. Real refit/holdout scoring, complete deletion, and frontend usability require later acceptance checks.
 
 ### Local backend entrypoints
 

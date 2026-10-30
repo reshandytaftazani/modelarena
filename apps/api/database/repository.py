@@ -17,12 +17,13 @@ import sqlite3
 from typing import Iterator
 from uuid import uuid4
 
-from apps.api.database.schema import (DELETION_INTENTS_SQL, JOB_PROGRESS_SQL, SCHEMA_SQL, SCHEMA_VERSION,
+import secrets
+from apps.api.database.schema import (DELETION_INTENTS_SQL, FINALIZATIONS_SQL, JOB_PROGRESS_SQL, SCHEMA_SQL, SCHEMA_VERSION,
                                       SCOPE_LOCK_MARKERS_SQL, SCOPE_TOMBSTONES_SQL,
                                       WORKER_PRESENCE_SQL, WORKER_PROCESSES_SQL)
 from apps.api.workers.monitor import process_liveness
 from apps.api.workers.control import check_safe_error, check_stage, check_state
-from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType, TrainingContext
+from ml.contracts import DatasetConfig, DatasetProfile, FrozenSelection, ResourceLimits, RunConfig, SplitManifest, TaskType, TrainingContext
 from ml.data.csv_io import ValidatedDataset
 from ml.data.splits import _config_digest, manifest_json, verify_manifest
 from ml.evaluation.metrics import metric_direction
@@ -186,7 +187,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -196,8 +197,6 @@ class JobRepository:
                 # Recheck after acquiring the lock: another initializer may win.
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 if version == 0:
-                    # executescript implicitly commits; execute complete statements
-                    # individually so DDL, triggers and version share one commit.
                     statement = ""
                     for line in SCHEMA_SQL.splitlines():
                         statement += line + "\n"
@@ -205,26 +204,49 @@ class JobRepository:
                             db.execute(statement)
                             statement = ""
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                elif version == 1:
-                    db.execute(WORKER_PROCESSES_SQL)
-                    db.execute(DELETION_INTENTS_SQL)
-                    db.execute(WORKER_PRESENCE_SQL)
-                    db.execute(SCOPE_LOCK_MARKERS_SQL)
-                    db.execute(SCOPE_TOMBSTONES_SQL)
-                    db.execute(JOB_PROGRESS_SQL)
-                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                elif version == 2:
-                    db.execute(DELETION_INTENTS_SQL)
-                    db.execute(WORKER_PRESENCE_SQL)
-                    db.execute(SCOPE_LOCK_MARKERS_SQL)
-                    db.execute(SCOPE_TOMBSTONES_SQL)
-                    db.execute(JOB_PROGRESS_SQL)
-                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                elif version == 3:
-                    db.execute(WORKER_PRESENCE_SQL)
-                    db.execute(SCOPE_LOCK_MARKERS_SQL)
-                    db.execute(SCOPE_TOMBSTONES_SQL)
-                    db.execute(JOB_PROGRESS_SQL)
+                elif version in (1, 2, 3, 4):
+                    if version < 2:
+                        db.execute(WORKER_PROCESSES_SQL)
+                    if version < 3:
+                        db.execute(DELETION_INTENTS_SQL)
+                    if version < 4:
+                        db.execute(WORKER_PRESENCE_SQL)
+                        db.execute(SCOPE_LOCK_MARKERS_SQL)
+                        db.execute(SCOPE_TOMBSTONES_SQL)
+                        db.execute(JOB_PROGRESS_SQL)
+                    statement = ""
+                    for line in FINALIZATIONS_SQL.splitlines():
+                        statement += line + "\n"
+                        if sqlite3.complete_statement(statement):
+                            db.execute(statement)
+                            statement = ""
+                    db.execute("PRAGMA foreign_keys=OFF")
+                    db.execute("""CREATE TABLE IF NOT EXISTS jobs_v5 (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL UNIQUE,
+                        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+                        kind TEXT NOT NULL CHECK(kind IN ('cv', 'finalization')),
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        payload_sha256 TEXT NOT NULL,
+                        state TEXT NOT NULL CHECK(state IN ('queued','running','completed','failed','interrupted','cancelled')),
+                        owner_token TEXT,
+                        owner_generation INTEGER,
+                        attempt_id TEXT UNIQUE,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+                        stage TEXT NOT NULL DEFAULT 'queued',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        heartbeat_at TEXT,
+                        safe_error TEXT,
+                        CHECK(state != 'running' OR
+                              (owner_token IS NOT NULL AND owner_generation > 0 AND attempt_id IS NOT NULL))
+                    )""")
+                    db.execute("INSERT INTO jobs_v5 SELECT * FROM jobs")
+                    db.execute("DROP TABLE jobs")
+                    db.execute("ALTER TABLE jobs_v5 RENAME TO jobs")
+                    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_running_job ON jobs((1)) WHERE state='running'")
+                    db.execute("CREATE INDEX IF NOT EXISTS queued_jobs ON jobs(state, sequence)")
+                    db.execute("PRAGMA foreign_keys=ON")
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise ValueError("Unsupported metadata schema version")
@@ -390,7 +412,7 @@ class JobRepository:
                 raise NotFoundError("Job not found")
             return bool(row[0])
 
-    def claim_next(self, owner: WorkerIdentity, *, supervisor_process: tuple[int, float] | None = None) -> JobRecord | None:
+    def claim_next(self, owner: WorkerIdentity, *, supervisor_process: tuple[int, float] | None = None, kind: str | None = None) -> JobRecord | None:
         if not isinstance(owner, WorkerIdentity):
             raise TypeError("WorkerIdentity required")
         with self._transaction() as db:
@@ -400,7 +422,10 @@ class JobRepository:
                 return None
             if db.execute("SELECT 1 FROM jobs WHERE state='running'").fetchone():
                 return None
-            row = db.execute("SELECT * FROM jobs WHERE state='queued' AND cancel_requested=0 ORDER BY sequence LIMIT 1").fetchone()
+            if kind is not None:
+                row = db.execute("SELECT * FROM jobs WHERE state='queued' AND kind=? AND cancel_requested=0 ORDER BY sequence LIMIT 1", (kind,)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM jobs WHERE state='queued' AND cancel_requested=0 ORDER BY sequence LIMIT 1").fetchone()
             if row is None:
                 return None
             now, attempt_id = _now(), str(uuid4())
@@ -598,3 +623,249 @@ class JobRepository:
             result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
         logger.info("Cancellation requested: %s", result.job_id)
         return result
+
+    def reserve_finalization(self, scope_id: str, candidate_id: str, digest: str) -> FrozenSelection:
+        import math
+        _text(scope_id)
+        _text(candidate_id)
+        _text(digest)
+        with self._transaction() as db:
+            scope = db.execute(
+                "SELECT scope_id, canonical_sha256, target, task FROM evaluation_scopes WHERE scope_id=?",
+                (scope_id,),
+            ).fetchone()
+            if scope is None:
+                raise NotFoundError("Evaluation scope not found")
+
+            if db.execute("SELECT 1 FROM deletion_intents i JOIN datasets d ON d.dataset_id=i.dataset_id WHERE d.canonical_sha256=?",
+                          (scope["canonical_sha256"],)).fetchone():
+                raise ConflictError("Dataset deletion is pending")
+
+            marker = db.execute("SELECT state FROM scope_lock_markers WHERE scope_id=?", (scope_id,)).fetchone()
+            if marker and marker["state"] == "consumed":
+                raise ConflictError("Holdout already consumed")
+
+            existing = db.execute("SELECT * FROM finalizations WHERE scope_id=?", (scope_id,)).fetchone()
+            if existing is not None:
+                if existing["candidate_id"] != candidate_id or existing["candidate_digest"] != digest:
+                    raise ConflictError("Evaluation scope already has a reserved candidate")
+                cand_row = db.execute(
+                    "SELECT c.*, e.primary_metric, e.direction, e.run_json, s.manifest_sha256 "
+                    "FROM candidates c JOIN experiments e ON e.experiment_id=c.experiment_id "
+                    "JOIN configurations cfg ON cfg.configuration_id=e.configuration_id "
+                    "JOIN splits s ON s.split_id=cfg.split_id WHERE c.candidate_id=?",
+                    (candidate_id,),
+                ).fetchone()
+                bundle = self.read_published_results(cand_row["job_id"])
+                cand_data = next((c for c in bundle.get("candidates", []) if c.get("family") == cand_row["family"]), {})
+                summary = cand_data.get("summary", [])
+                score = next((s["mean"] for s in summary if s.get("name") == cand_row["primary_metric"]), 0.0)
+                run_dict = json.loads(cand_row["run_json"])
+                limits = ResourceLimits(**run_dict.get("limits", {}))
+                return FrozenSelection(
+                    finalization_id=existing["finalization_id"],
+                    scope_id=scope_id,
+                    experiment_id=existing["experiment_id"],
+                    candidate_id=candidate_id,
+                    candidate_digest=digest,
+                    family=cand_row["family"],
+                    task=TaskType(scope["task"]),
+                    primary_metric=cand_row["primary_metric"],
+                    primary_score=float(score if score is not None else 0.0),
+                    direction=cand_row["direction"],
+                    split_sha256=cand_row["manifest_sha256"],
+                    config_sha256=cand_row["config_sha256"],
+                    model_seed=cand_data.get("model_seed", 42),
+                    resource_limits=limits,
+                    created_at=existing["created_at"],
+                )
+
+            cand_row = db.execute(
+                "SELECT c.*, e.primary_metric, e.direction, e.run_json, cfg.scope_id as cfg_scope_id, s.manifest_sha256 "
+                "FROM candidates c JOIN experiments e ON e.experiment_id=c.experiment_id "
+                "JOIN configurations cfg ON cfg.configuration_id=e.configuration_id "
+                "JOIN splits s ON s.split_id=cfg.split_id WHERE c.candidate_id=?",
+                (candidate_id,),
+            ).fetchone()
+            if cand_row is None:
+                raise NotFoundError("Candidate not found")
+            if cand_row["cfg_scope_id"] != scope_id:
+                raise ConflictError("Candidate does not belong to this evaluation scope")
+            if cand_row["status"] != "completed":
+                raise ConflictError("Candidate is not eligible for finalization")
+
+            bundle = self.read_published_results(cand_row["job_id"])
+            cand_data = next((c for c in bundle.get("candidates", []) if c.get("family") == cand_row["family"]), None)
+            if cand_data is None or not cand_data.get("eligible"):
+                raise ConflictError("Candidate is not eligible for finalization")
+
+            from apps.api.services.finalization import compute_candidate_digest
+            summary = cand_data.get("summary", [])
+            score = next((s["mean"] for s in summary if s.get("name") == cand_row["primary_metric"]), None)
+            if score is None or not math.isfinite(score):
+                raise ConflictError("Candidate primary metric is undefined or nonfinite")
+
+            computed = compute_candidate_digest(
+                candidate_id=candidate_id,
+                family=cand_row["family"],
+                split_sha256=cand_row["manifest_sha256"],
+                config_sha256=cand_row["config_sha256"],
+                primary_metric=cand_row["primary_metric"],
+                primary_score=score,
+                model_seed=cand_data.get("model_seed", 42),
+            )
+            if computed != digest:
+                raise ConflictError("Candidate digest mismatch")
+
+            finalization_id = str(uuid4())
+            now = _now()
+            db.execute(
+                "INSERT INTO finalizations(finalization_id, scope_id, experiment_id, candidate_id, candidate_digest, state, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,'reserved',?,?)",
+                (finalization_id, scope_id, cand_row["experiment_id"], candidate_id, digest, now, now),
+            )
+            db.execute(
+                "INSERT INTO scope_lock_markers(scope_id, state) VALUES(?, 'reserved') ON CONFLICT(scope_id) DO NOTHING",
+                (scope_id,),
+            )
+            _audit(db, "service", finalization_id, "finalization_reserved")
+
+            run_dict = json.loads(cand_row["run_json"])
+            limits = ResourceLimits(**run_dict.get("limits", {}))
+            return FrozenSelection(
+                finalization_id=finalization_id,
+                scope_id=scope_id,
+                experiment_id=cand_row["experiment_id"],
+                candidate_id=candidate_id,
+                candidate_digest=digest,
+                family=cand_row["family"],
+                task=TaskType(scope["task"]),
+                primary_metric=cand_row["primary_metric"],
+                primary_score=float(score),
+                direction=cand_row["direction"],
+                split_sha256=cand_row["manifest_sha256"],
+                config_sha256=cand_row["config_sha256"],
+                model_seed=cand_data.get("model_seed", 42),
+                resource_limits=limits,
+                created_at=now,
+            )
+
+    def enqueue_finalization(self, finalization_id: str, idempotency_key: str) -> JobRecord:
+        _text(finalization_id)
+        _text(idempotency_key)
+        with self._transaction() as db:
+            fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
+            if fin is None:
+                raise NotFoundError("Finalization not found")
+            if fin["refit_job_id"] is not None:
+                existing_job = db.execute("SELECT * FROM jobs WHERE job_id=?", (fin["refit_job_id"],)).fetchone()
+                if existing_job:
+                    return _record(existing_job)
+
+            payload = _digest(_json(["finalization", fin["experiment_id"], fin["candidate_digest"]]))
+            existing = db.execute("SELECT * FROM jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if existing:
+                if existing["payload_sha256"] != payload:
+                    raise ConflictError("Idempotency key was used with a different payload")
+                return _record(existing)
+
+            job_id, now = str(uuid4()), _now()
+            db.execute("""INSERT INTO jobs(job_id, experiment_id, kind, idempotency_key, payload_sha256, state, created_at, updated_at)
+                          VALUES(?, ?, 'finalization', ?, ?, 'queued', ?, ?)""",
+                       (job_id, fin["experiment_id"], idempotency_key, payload, now, now))
+            db.execute("UPDATE finalizations SET refit_job_id=?, state='refitting', updated_at=? WHERE finalization_id=?",
+                       (job_id, now, finalization_id))
+            _audit(db, "service", job_id, "finalization_enqueued")
+            result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+        logger.info("Finalization job queued: %s", result.job_id)
+        return result
+
+    def retry_pre_evaluation(self, finalization_id: str, idempotency_key: str) -> JobRecord:
+        _text(finalization_id)
+        _text(idempotency_key)
+        with self._transaction() as db:
+            fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
+            if fin is None:
+                raise NotFoundError("Finalization not found")
+
+            if fin["evaluation_started_at"] is not None or fin["state"] in ("evaluating", "evaluated", "locked_failed"):
+                raise ConflictError("Evaluation has already started or completed; holdout cannot be re-evaluated")
+
+            if fin["refit_job_id"]:
+                prev_job = db.execute("SELECT * FROM jobs WHERE job_id=?", (fin["refit_job_id"],)).fetchone()
+                if prev_job and prev_job["attempt_id"]:
+                    proc = db.execute("SELECT child_pid, child_created FROM worker_processes WHERE attempt_id=?",
+                                      (prev_job["attempt_id"],)).fetchone()
+                    if proc and proc["child_pid"]:
+                        if process_liveness(proc["child_pid"], proc["child_created"]) != "dead":
+                            raise ConflictError("Previous worker child must be verified dead before retry")
+                if prev_job and prev_job["state"] == "running":
+                    raise ConflictError("Previous worker child must be verified dead before retry")
+
+            payload = _digest(_json(["finalization", fin["experiment_id"], fin["candidate_digest"], "retry"]))
+            existing = db.execute("SELECT * FROM jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if existing:
+                if existing["payload_sha256"] != payload:
+                    raise ConflictError("Idempotency key was used with a different payload")
+                return _record(existing)
+
+            job_id, now = str(uuid4()), _now()
+            db.execute("""INSERT INTO jobs(job_id, experiment_id, kind, idempotency_key, payload_sha256, state, created_at, updated_at)
+                          VALUES(?, ?, 'finalization', ?, ?, 'queued', ?, ?)""",
+                       (job_id, fin["experiment_id"], idempotency_key, payload, now, now))
+            db.execute("UPDATE finalizations SET refit_job_id=?, state='refitting', updated_at=? WHERE finalization_id=?",
+                       (job_id, now, finalization_id))
+            _audit(db, "service", finalization_id, "finalization_retried")
+            result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+        logger.info("Finalization job retried: %s", result.job_id)
+        return result
+
+    def start_evaluation(self, finalization_id: str, expected_digest: str) -> tuple[str, str]:
+        _text(finalization_id)
+        _text(expected_digest)
+        with self._transaction() as db:
+            fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
+            if fin is None:
+                raise NotFoundError("Finalization not found")
+            if fin["evaluation_started_at"] is not None or fin["state"] in ("evaluating", "evaluated", "locked_failed"):
+                raise ConflictError("Evaluation has already started or failed")
+            if fin["candidate_digest"] != expected_digest:
+                raise ConflictError("Candidate digest mismatch")
+
+            token = secrets.token_hex(32)
+            now = _now()
+            db.execute(
+                "UPDATE finalizations SET state='evaluating', evaluation_started_at=?, updated_at=? WHERE finalization_id=?",
+                (now, now, finalization_id),
+            )
+            db.execute(
+                "INSERT INTO scope_lock_markers(scope_id, state) VALUES(?, 'consumed') "
+                "ON CONFLICT(scope_id) DO UPDATE SET state='consumed'",
+                (fin["scope_id"],),
+            )
+            _audit(db, "service", finalization_id, "evaluation_started")
+            return fin["scope_id"], token
+
+    def get_finalization(self, scope_id: str) -> dict | None:
+        _text(scope_id)
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM finalizations WHERE scope_id=?", (scope_id,)).fetchone()
+            return dict(row) if row is not None else None
+
+    def record_evaluation_result(self, finalization_id: str, state: str,
+                                 result_path: str | None = None, result_checksum: str | None = None) -> None:
+        _text(finalization_id)
+        if state not in ("evaluated", "locked_failed"):
+            raise ValueError("Invalid terminal evaluation state")
+        with self._transaction() as db:
+            now = _now()
+            db.execute(
+                "UPDATE finalizations SET state=?, result_path=?, result_checksum=?, updated_at=? WHERE finalization_id=?",
+                (state, result_path, result_checksum, now, finalization_id),
+            )
+            db.execute(
+                "UPDATE scope_lock_markers SET state='consumed' WHERE scope_id="
+                "(SELECT scope_id FROM finalizations WHERE finalization_id=?)",
+                (finalization_id,),
+            )
+            _audit(db, "service", finalization_id, f"evaluation_{state}")

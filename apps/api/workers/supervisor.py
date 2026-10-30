@@ -139,6 +139,7 @@ class WorkerSupervisor:
         self.owner = WorkerIdentity(self.owner.owner_token, self.repository.lease_generation())
         claimed = self.repository.claim_next(
             self.owner, supervisor_process=(os.getpid(), monitor.process_creation_time(os.getpid())),
+            kind="cv" if self.workload == "classical" else None,
         )
         if claimed is None:
             return None

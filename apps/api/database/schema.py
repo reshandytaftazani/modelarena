@@ -1,6 +1,6 @@
 """Application schema and additive worker-identity migration, applied explicitly."""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 WORKER_PRESENCE_SQL = """
 CREATE TABLE IF NOT EXISTS worker_presence (
@@ -25,6 +25,25 @@ CREATE TABLE IF NOT EXISTS scope_tombstones (
     version INTEGER NOT NULL CHECK(version=1),
     state TEXT NOT NULL CHECK(state IN ('reserved','consumed'))
 );
+"""
+FINALIZATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS finalizations (
+    finalization_id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL UNIQUE REFERENCES evaluation_scopes(scope_id),
+    experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    candidate_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('reserved','refitting','evaluating','evaluated','retryable_pre_evaluation','locked_failed')),
+    refit_job_id TEXT REFERENCES jobs(job_id),
+    attempt_id TEXT,
+    evaluation_started_at TEXT,
+    result_checksum TEXT,
+    result_path TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS finalizations_immutable_selection BEFORE UPDATE OF scope_id, candidate_id, candidate_digest ON finalizations
+BEGIN SELECT RAISE(ABORT, 'finalization selection is immutable'); END;
 """
 JOB_PROGRESS_SQL = """
 CREATE TABLE IF NOT EXISTS job_progress (
@@ -106,7 +125,7 @@ CREATE TABLE jobs (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id TEXT NOT NULL UNIQUE,
     experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
-    kind TEXT NOT NULL CHECK(kind='cv'),
+    kind TEXT NOT NULL CHECK(kind IN ('cv', 'finalization')),
     idempotency_key TEXT NOT NULL UNIQUE,
     payload_sha256 TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('queued','running','completed','failed','interrupted','cancelled')),
@@ -170,4 +189,5 @@ SCHEMA_SQL += DELETION_INTENTS_SQL
 SCHEMA_SQL += WORKER_PRESENCE_SQL
 SCHEMA_SQL += SCOPE_LOCK_MARKERS_SQL
 SCHEMA_SQL += SCOPE_TOMBSTONES_SQL
+SCHEMA_SQL += FINALIZATIONS_SQL
 SCHEMA_SQL += JOB_PROGRESS_SQL
