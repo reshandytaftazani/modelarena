@@ -328,6 +328,11 @@ def read_manifest(path: Path) -> SplitManifest:
     """Read private JSON, enforcing bounds, structure and checksum before use."""
     with Path(path).open("rb") as source:
         content = source.read(16_000_001)
+    return parse_manifest(content)
+
+
+def parse_manifest(content: bytes) -> SplitManifest:
+    """Validate the persisted manifest bytes without accepting client paths."""
     try:
         if len(content) > 16_000_000:
             raise ValueError("Manifest size exceeded")

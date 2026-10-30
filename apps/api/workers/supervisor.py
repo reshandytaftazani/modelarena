@@ -78,6 +78,7 @@ class WorkerSupervisor:
         workload: str = "probe",
         workload_options: Mapping[str, Any] | None = None,
         classical_input: tuple[PreparedExperiment, RunConfig] | None = None,
+        load_from_storage: bool = False,
         heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
         sample_seconds: float = DEFAULT_SAMPLE_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -93,9 +94,14 @@ class WorkerSupervisor:
         self.limits = limits
         self.workload = control.check_workload(workload)
         self.options = control.validate_options(self.workload, dict(workload_options or {}))
-        if (self.workload == "classical") != (classical_input is not None):
+        if type(load_from_storage) is not bool or (load_from_storage and (self.workload != "classical" or classical_input is not None)):
+            raise ValueError("Stored input is available only for the classical workload")
+        if self.workload == "classical" and classical_input is None and not load_from_storage:
+            raise ValueError("Classical workload requires trusted prepared input")
+        if self.workload != "classical" and classical_input is not None:
             raise ValueError("Classical workload requires trusted prepared input")
         self.classical_input = classical_input
+        self.load_from_storage = load_from_storage
         self.heartbeat_seconds = _interval(heartbeat_seconds, "heartbeat", 0.05, 60)
         self.sample_seconds = monitor.check_interval(sample_seconds)
         self.poll_seconds = _interval(poll_seconds, "poll", 0.01, 5)
@@ -150,6 +156,9 @@ class WorkerSupervisor:
                 from apps.api.services.jobs import PreparedExperiment
                 from ml.contracts import RunConfig
                 try:
+                    if self.load_from_storage:
+                        from apps.api.services.workflow import load_experiment
+                        self.classical_input = load_experiment(self.repository, job.experiment_id)
                     prepared, run = self.classical_input
                     if (not isinstance(prepared, PreparedExperiment) or not isinstance(run, RunConfig)
                             or prepared.experiment_id != job.experiment_id or run.limits != self.limits):

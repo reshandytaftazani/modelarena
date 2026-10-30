@@ -17,7 +17,7 @@ import sqlite3
 from typing import Iterator
 from uuid import uuid4
 
-from apps.api.database.schema import SCHEMA_SQL, SCHEMA_VERSION, WORKER_PROCESSES_SQL
+from apps.api.database.schema import DELETION_INTENTS_SQL, SCHEMA_SQL, SCHEMA_VERSION, WORKER_PROCESSES_SQL
 from apps.api.workers.monitor import process_liveness
 from apps.api.workers.control import check_safe_error, check_stage, check_state
 from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType, TrainingContext
@@ -184,7 +184,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -205,6 +205,10 @@ class JobRepository:
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version == 1:
                     db.execute(WORKER_PROCESSES_SQL)
+                    db.execute(DELETION_INTENTS_SQL)
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 2:
+                    db.execute(DELETION_INTENTS_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise ValueError("Unsupported metadata schema version")
@@ -234,6 +238,9 @@ class JobRepository:
         with self._transaction() as db:
             dataset = db.execute("SELECT dataset_id FROM datasets WHERE raw_sha256=?", (data.raw_sha256,)).fetchone()
             dataset_id = dataset[0] if dataset else str(uuid4())
+            if db.execute("SELECT 1 FROM deletion_intents i JOIN datasets d ON d.dataset_id=i.dataset_id "
+                          "WHERE d.canonical_sha256=?", (data.canonical_sha256,)).fetchone():
+                raise ConflictError("Dataset deletion is pending")
             if not dataset:
                 db.execute("INSERT INTO datasets VALUES(?,?,?,?,?,?,?,?)", (
                     dataset_id, data.raw_sha256, data.canonical_sha256, data.parse_policy_version,
@@ -321,6 +328,11 @@ class JobRepository:
         _text(experiment_id)
         _text(idempotency_key)
         with self._transaction() as db:
+            if db.execute("SELECT 1 FROM experiments e JOIN configurations c ON c.configuration_id=e.configuration_id "
+                          "JOIN datasets source ON source.dataset_id=c.dataset_id JOIN datasets d ON d.canonical_sha256=source.canonical_sha256 "
+                          "JOIN deletion_intents i ON i.dataset_id=d.dataset_id WHERE e.experiment_id=?",
+                          (experiment_id,)).fetchone():
+                raise ConflictError("Dataset deletion is pending")
             experiment = db.execute("SELECT payload_sha256,queue_limit FROM experiments WHERE experiment_id=?", (experiment_id,)).fetchone()
             if experiment is None:
                 raise NotFoundError("Experiment not found")

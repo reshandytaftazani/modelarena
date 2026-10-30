@@ -8,7 +8,7 @@ ModelArena is a planned local ML experimentation platform for students and devel
 
 > **Day 12 local tracking verified:** classical CV results and bounded out-of-fold diagnostics are privately persisted with checksums, a manifest and local MLflow runs. Final evaluation locks, the dashboard and the full resource benchmark comparison remain planned.
 
-> **Day 13 partial:** a local-token-protected job inspection/cancellation and CV-only leaderboard API has been added. Upload/configuration/queue APIs, executable worker integration and deletion are not yet implemented; this is not an end-to-end workflow.
+> **Day 13 partial:** the local API supports CSV upload, configuration, CV queueing, job monitoring and CV inspection. An explicitly started worker can reconstruct a queued experiment. Deletion remains pending until tracking data and evaluation-lock tombstones are handled; this is not yet a complete end-to-end product.
 
 ## Why ModelArena
 
@@ -95,7 +95,7 @@ Verified delivery as of **2026-10-30**:
 | Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
 | Day 11 CV comparison and diagnostics | Verified locally | 387 tests passed, zero skips; persistence completed on Day 12; see [validation evidence](docs/VALIDATION.md#day-11--2026-10-30) |
 | Day 12 local MLflow and atomic publication | Verified locally | 394 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-12--2026-10-30) |
-| Day 13 backend workflow and deletion | Partial | CV leaderboard and restricted job API only; upload, queue integration and deletion remain pending; see [validation evidence](docs/VALIDATION.md#day-13-partial--2026-10-30) |
+| Day 13 backend workflow and deletion | Partial | Upload-to-queued-worker fixture and pending deletion intent verified; complete deletion and remaining API acceptance pending; see [validation evidence](docs/VALIDATION.md#day-13-continuation--2026-10-30) |
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
 | G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |

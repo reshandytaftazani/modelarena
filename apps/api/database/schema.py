@@ -1,6 +1,13 @@
 """Application schema and additive worker-identity migration, applied explicitly."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+DELETION_INTENTS_SQL = """
+CREATE TABLE IF NOT EXISTS deletion_intents (
+    dataset_id TEXT PRIMARY KEY REFERENCES datasets(dataset_id),
+    created_at TEXT NOT NULL
+);
+"""
 
 WORKER_PROCESSES_SQL = """
 CREATE TABLE worker_processes (
@@ -125,3 +132,4 @@ BEGIN SELECT RAISE(ABORT, 'metadata is immutable'); END;
 """
 
 SCHEMA_SQL += WORKER_PROCESSES_SQL
+SCHEMA_SQL += DELETION_INTENTS_SQL
