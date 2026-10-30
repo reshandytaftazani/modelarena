@@ -288,6 +288,35 @@ class JobRepository:
                 or row[2] != manifest_json(context.split)):
             raise ConflictError("Classical input does not match frozen experiment")
 
+    def tracking_dataset(self, experiment_id: str) -> dict:
+        """Return stored input identities without exposing any dataset rows."""
+        with self._connection() as db:
+            row = db.execute("SELECT d.raw_sha256,d.canonical_sha256,d.parse_policy_version "
+                             "FROM experiments e JOIN configurations c ON c.configuration_id=e.configuration_id "
+                             "JOIN datasets d ON d.dataset_id=c.dataset_id WHERE e.experiment_id=?", (experiment_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("Experiment not found")
+        return dict(row)
+
+    def read_published_results(self, job_id: str) -> dict:
+        """Read only committed bundles, checking both manifest and contents each time."""
+        from ml.tracking.manifest import file_digest
+        with self._connection() as db:
+            row = db.execute("SELECT c.bundle_path,c.bundle_sha256 FROM candidates c "
+                             "JOIN jobs j ON j.job_id=c.job_id WHERE j.job_id=? AND j.state='completed' LIMIT 1", (job_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("No published results")
+        folder = Path(row["bundle_path"]).resolve()
+        if folder.parent != (self.path.parent / "results").resolve():
+            raise ValueError("Invalid bundle location")
+        if file_digest(folder / "manifest.json") != row["bundle_sha256"]:
+            raise ValueError("Manifest checksum mismatch")
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        if file_digest(folder / "results.json") != manifest["artifact_sha256"]["results.json"]:
+            raise ValueError("Results checksum mismatch")
+        payload = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+        return {**payload, "manifest": manifest}
+
     def enqueue_cv(self, experiment_id: str, idempotency_key: str) -> JobRecord:
         _text(experiment_id)
         _text(idempotency_key)
@@ -438,7 +467,8 @@ class JobRepository:
 
     def finish_job(self, owner: WorkerIdentity, job_id: str, attempt_id: str, *,
                    state: str, stage: str, safe_error: str | None = None,
-                   telemetry: dict[str, object] | None = None) -> JobRecord:
+                   telemetry: dict[str, object] | None = None,
+                   publication: dict | None = None) -> JobRecord:
         """Publish one terminal transition and release the singleton slot atomically.
 
         Only the verified attempt owner may finish. Resource telemetry is an
@@ -463,6 +493,18 @@ class JobRepository:
                     raise ConflictError("Child death must be verified before releasing its slot")
             if row["cancel_requested"] and state == "completed":
                 state, stage, safe_error = "cancelled", "cancelled", "cancelled"
+            if state == "completed" and publication is not None:
+                from ml.tracking.manifest import file_digest
+                folder = Path(publication["path"]).resolve()
+                if (folder.parent != (self.path.parent / "results").resolve() or folder.name != attempt_id
+                        or file_digest(folder / "manifest.json") != publication["manifest_sha256"]
+                        or file_digest(folder / "results.json") != publication["results_sha256"]):
+                    raise ValueError("Bundle checksum or identity mismatch")
+                for candidate in publication["candidates"]:
+                    db.execute("INSERT INTO candidates(candidate_id,experiment_id,job_id,attempt_id,family,status,config_sha256,bundle_path,bundle_sha256,mlflow_run_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (candidate["candidate_id"], row["experiment_id"], job_id, attempt_id,
+                                candidate["family"], "completed" if candidate["eligible"] else "failed",
+                                candidate["config_sha256"], str(folder), publication["manifest_sha256"], candidate["run_id"]))
             now = _now()
             db.execute("""UPDATE jobs SET state=?,stage=?,safe_error=?,updated_at=?,heartbeat_at=?
                           WHERE job_id=?""", (state, stage, safe_error, now, now, job_id))

@@ -122,6 +122,13 @@ class WorkerSupervisor:
         self._child_created = None
         if not self.repository.reconcile_worker():
             return None
+        from ml.tracking.reconcile import reconcile_orphans
+        try:
+            reconcile_orphans(self.repository)
+        except Exception:
+            # Do not start another attempt while cross-store recovery is unknown.
+            logger.warning("Tracking reconciliation unavailable; worker remains idle")
+            return None
         # Recovery may have advanced the fencing generation after construction.
         self.owner = WorkerIdentity(self.owner.owner_token, self.repository.lease_generation())
         claimed = self.repository.claim_next(
@@ -175,10 +182,23 @@ class WorkerSupervisor:
         except ValueError:
             logger.warning("Dropping unrenderable telemetry for job %s", job.job_id)
             telemetry = None
+        publication = None
+        if outcome.state == "completed" and self.workload == "classical":
+            try:
+                from ml.tracking.publication import stage_attempt
+                prepared, run = self.classical_input
+                publication = stage_attempt(self.repository.path.parent, job, prepared.context, run,
+                                            self.repository.tracking_dataset(job.experiment_id),
+                                            self.last_result, telemetry)
+            except Exception:
+                logger.warning("Tracking or bundle staging failed for job %s", job.job_id)
+                self.last_result = None
+                outcome = _Outcome("failed", "failed", "supervisor_error")
         try:
             final = self.repository.finish_job(
                 self.owner, job.job_id, attempt_id, state=outcome.state,
                 stage=outcome.stage, safe_error=outcome.code, telemetry=telemetry,
+                publication=publication,
             )
             if final.state != "completed":
                 self.last_result = None
@@ -187,6 +207,19 @@ class WorkerSupervisor:
             self.last_result = None
             logger.warning("Stale supervisor refused publication for job %s", job.job_id)
             return self.repository.get_job(job.job_id)
+        except Exception:
+            # A failed DB transaction cannot publish partial candidate rows. Try
+            # to close the attempt as failed; if the store remains unavailable,
+            # preserve the running lease for verified-death reconciliation.
+            self.last_result = None
+            logger.warning("Result publication failed for job %s", job.job_id)
+            try:
+                return self.repository.finish_job(self.owner, job.job_id, attempt_id,
+                                                  state="failed", stage="failed",
+                                                  safe_error="supervisor_error", telemetry=telemetry)
+            except Exception:
+                logger.warning("Could not persist publication failure for job %s", job.job_id)
+                raise
 
     def _telemetry(self) -> dict[str, object]:
         # ``get`` rather than ``[]``: a sampler summary missing a key must not

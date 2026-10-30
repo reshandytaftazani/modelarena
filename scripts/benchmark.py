@@ -217,6 +217,8 @@ def main() -> None:
         inventory = build_inventory(repository)
         dirty = _probe(["git", "status", "--porcelain", "--untracked-files=normal"], repository)
         report = run_initial_probe(config, output)
+        from ml.tracking.manifest import execution_provenance
+        report["execution_provenance"] = execution_provenance()
         report["inventory"] = inventory
         report["code_dirty"] = bool(dirty.get("value")) if dirty["status"] == "observed" else None
         report["measurement_note"] = "Includes numerical imports, CSV generation, parsing and CV; inventory excluded."

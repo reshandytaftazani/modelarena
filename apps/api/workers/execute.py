@@ -168,6 +168,7 @@ def child_main(
                 except SuiteCancelled:
                     return
                 comparison = compare_candidates(context, candidates)
+                from threadpoolctl import threadpool_info
                 result = {"pid": os.getpid(), "workload": "classical", "candidates": [
                     {**asdict(candidate), "eligible": candidate.eligible} for candidate in candidates
                 ], "comparison": {
@@ -175,7 +176,7 @@ def child_main(
                                 "mean_fit_seconds": entry.mean_fit_seconds, "baseline_delta": entry.baseline_delta,
                                 "tied": entry.tied} for entry in comparison.ranked],
                     "unranked": [candidate.family for candidate in comparison.unranked],
-                }}
+                }, "observed_threadpools": _pool_report(threadpool_info())}
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:
