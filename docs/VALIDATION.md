@@ -1,5 +1,17 @@
 # Validation evidence
 
+## Day 13 partial — 2026-10-30
+
+The user requested Day 13, English output, commit and push. The checkout started clean on `main`. No dependencies, downloads, user data or holdout evaluation were added. **Neither Day 13 deliverable is complete.**
+
+- Added a CV-only leaderboard service which reads the latest published completed CV attempt, validates candidate identities/statuses and finite values, and preserves the already verified fold-mean ranking, baseline deltas and timing. It reads the checksum-verified private result bundle, not a holdout table, and does not combine attempts. A SQLite authorizer denies holdout-table access in the tests; an actual spawned regression fixture supplies published data.
+- Added a restricted FastAPI factory for job state, cancellation and the leaderboard, with explicit session-token injection, loopback Host checks, exact configured local Origins, narrow browser preflight, bounded empty cancellation bodies and opaque UUID validation. It does not launch a server or worker. Callers must generate a strong secret token and bind the server to loopback; token creation/distribution and production startup remain pending. There is no upload, configuration, experiment creation, job enqueue or candidate inspection API.
+- The current worker requires a preconstructed in-memory `PreparedExperiment`; uploaded dataset persistence and safe restart reconstruction are not implemented. A queue endpoint alone would not provide a working uploaded-dataset workflow. Deletion intent, active-reference checks, private-file cleanup and keyed evaluation tombstones are also **not implemented**; MLflow deletion remains scheduled for Day 25. Do not interpret this partial API as permission to delete user data or as completion of D13a/D13b. The specification and local plan's remaining acceptance criteria still apply.
+- Test-first: the new leaderboard and API suites initially failed collection because their modules were absent. The initial combined run passed six tests. The full suite after expanding coverage passed **403 tests in 190.33 seconds**, zero skips, with upstream Starlette and MLflow/SQLAlchemy deprecation warnings. `uv lock --check` and `git diff --check` passed. A subsequent test-only change also exercises the HTTP leaderboard against a real published bundle; see the final verification below.
+- Final targeted verification: `uv run --locked pytest tests/integration/test_api.py tests/integration/test_leaderboard.py -q` passed **9 tests in 15.99 seconds**, zero skips, with the same two upstream warnings. `graphify update .` refreshed the ignored AST graph; community labels may need review.
+
+G1 remains passed locally; G2–G4 remain pending. No final evaluation, benchmark or release is claimed.
+
 ## Day 12 — 2026-10-30
 
 The user requested Day 12, English output, commit and push. Work started on `main` with a clean checkout. No dependency changes, external dataset downloads, final holdout evaluation, frontend work or user data were added.

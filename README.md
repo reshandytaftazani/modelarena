@@ -8,6 +8,8 @@ ModelArena is a planned local ML experimentation platform for students and devel
 
 > **Day 12 local tracking verified:** classical CV results and bounded out-of-fold diagnostics are privately persisted with checksums, a manifest and local MLflow runs. Final evaluation locks, the dashboard and the full resource benchmark comparison remain planned.
 
+> **Day 13 partial:** a local-token-protected job inspection/cancellation and CV-only leaderboard API has been added. Upload/configuration/queue APIs, executable worker integration and deletion are not yet implemented; this is not an end-to-end workflow.
+
 ## Why ModelArena
 
 A high score is only useful when the evaluation is sound. Preprocessing before cross-validation, choosing models against test results, or skipping a simple baseline can make an experiment look better than it is.
@@ -93,12 +95,13 @@ Verified delivery as of **2026-10-30**:
 | Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
 | Day 11 CV comparison and diagnostics | Verified locally | 387 tests passed, zero skips; persistence completed on Day 12; see [validation evidence](docs/VALIDATION.md#day-11--2026-10-30) |
 | Day 12 local MLflow and atomic publication | Verified locally | 394 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-12--2026-10-30) |
+| Day 13 backend workflow and deletion | Partial | CV leaderboard and restricted job API only; upload, queue integration and deletion remain pending; see [validation evidence](docs/VALIDATION.md#day-13-partial--2026-10-30) |
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
 | G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical CV results are now durably published and tracked locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation and fail-closed recovery. Leaderboard APIs, finalization and application usability require later acceptance checks.
+Classical CV results are now durably published and tracked locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation and fail-closed recovery. The partial leaderboard API does not complete the workflow; finalization and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
