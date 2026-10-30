@@ -77,7 +77,7 @@ The Windows Python environment and CPU-only torch wheel have passed the Day 1 sm
 
 ## Development roadmap
 
-Verified delivery as of **2026-10-30**:
+Verified delivery as of **2026-10-31**:
 
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
@@ -97,10 +97,11 @@ Verified delivery as of **2026-10-30**:
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
 | Day 14 guarded finalization reservation and G2 | Verified locally | 446 tests passed, zero skips; holdout reservation lock, candidate digest validation, dead-child check, post-start evaluation lock, tombstone checks; see [validation evidence](docs/VALIDATION.md#day-14-core-acceptance-and-milestone-g2--2026-10-31) |
 | G2 — Classical experiments | Gate passed locally | Full classical suite, Windows worker recovery/cancel, MLflow tracking, candidate ranking, and durable holdout gate |
+| Day 15 PyTorch CPU foundations | Verified locally | 468 tests passed, zero skips; bounded MLP architecture, task loss selection, deterministic CPU DataLoader (workers=0), train/eval modes, weighted epoch loss, detached state dict, finite-loss guard, and RunControl cancellation; see [validation evidence](docs/VALIDATION.md#day-15-core-acceptance--2026-10-31) |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical CV results and guarded finalization reservation are now durably tracked locally; **G1 and G2 have passed locally; G3–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation, fail-closed recovery, and holdout gate reservation. Real refit/holdout scoring, complete deletion, and frontend usability require later acceptance checks.
+Classical CV results, guarded finalization reservation, and CPU PyTorch foundations are now durably tracked locally; **G1 and G2 have passed locally; G3–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation, fail-closed recovery, and holdout gate reservation. Real refit/holdout scoring, complete deletion, and frontend usability require later acceptance checks.
 
 ### Local backend entrypoints
 

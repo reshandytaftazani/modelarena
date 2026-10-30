@@ -1,5 +1,36 @@
 # Validation evidence
 
+## Day 15 core acceptance — 2026-10-31
+
+The user requested execution of Day 15 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 15 deliverables are complete and verified locally with zero regressions across the entire test suite.
+
+- **D15a PyTorch CPU MLP Architecture, Loss Selection, and DataLoader:**
+  - Implemented `make_mlp` in `ml/models/mlp.py` with configurable bounded hidden layer dimensions (defaults: 64/32, ReLU activations, scalar linear output), input bounds validation (`in_features > 0`, hidden dimension width `1..2048`, hidden depth `1..8`), and deterministic seeded CPU initialization (`0 <= seed < 2**32`).
+  - Added task loss selection `get_task_loss` in `ml/models/mlp.py`: `nn.BCEWithLogitsLoss` for `TaskType.BINARY_CLASSIFICATION` and `nn.MSELoss` for `TaskType.REGRESSION`.
+  - Added `ArrayDataset` converting tabular features and targets to `float32` CPU tensors with length and shape validation.
+  - Added deterministic seeded `create_dataloader` in `ml/models/mlp.py` strictly enforcing `num_workers=0`, `pin_memory=False` (CPU-only, no CUDA paths), and seeded CPU `torch.Generator` for reproducible batch shuffling.
+  - Added `create_optimizer` with standard default `torch.optim.Adam` at `lr=1e-3`.
+
+- **D15b Training Loop, Loss Tracking, Detached Best State, and RunControl:**
+  - Implemented `train_mlp` in `ml/training/mlp_loop.py` managing explicit `model.train()` training phases and `model.eval()` validation phases.
+  - Enforced no gradient leakage into validation: validation runs under `torch.no_grad()`, ensuring optimizer parameters receive zero gradient updates from validation data.
+  - Implemented exact sample-weighted epoch loss tracking (`total_loss * batch_size / total_samples`) preserving correct loss aggregation over variable batch sizes.
+  - Implemented detached best-state weight copies (`best_state_dict`), ensuring future model mutations or subsequent epochs never corrupt the saved best checkpoint.
+  - Added finite-loss checks raising `NonFiniteLossError` immediately when NaN or Inf loss occurs during training or validation, preventing corrupted models or masqueraded metrics.
+  - Implemented `RunControl` supporting cancellation checks and callbacks (`on_batch_end`, `on_epoch_end`). Cancellation at either batch or epoch boundaries immediately halts training and raises `TrainingCancelled` (subclass of `SuiteCancelled`).
+  - Implemented fold-local early stopping logic: validation loss improvement required strictly lower by `> min_delta (1e-6)`; initial finite epoch is tracked as best; restores best checkpoint weights after patience exhaustion.
+  - Added intra-op CPU compute threads scoping in `train_mlp` with safe restoration.
+
+- **Test-first and regression evidence:**
+  - Verified RED failure on `tests/unit/test_mlp.py` before implementation, followed by minimal implementation achieving GREEN.
+  - `uv run pytest tests/unit/test_mlp.py -q`: **22 passed in 8.81 s**.
+  - Full unit and integration regression suite `uv run pytest tests/unit tests/integration -q`: **468 passed, 0 failures, 0 skips in 298.20 s (0:04:58)**.
+  - `uv lock --check` succeeded.
+
+- **Limitations Recorded:**
+  - Strict inner-fold early stopping integration and leakage tests with persisted inner indices remain scheduled for Day 16.
+  - Both-task MLP CV integration, sigmoid probability scoring, and MLflow loss curve artifacts remain scheduled for Day 17.
+
 ## Day 14 core acceptance and Milestone G2 — 2026-10-31
 
 The user requested execution of Day 14 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 14 deliverables are complete and verified locally; Milestone G2 (Classical reliable experiments) is passed.
