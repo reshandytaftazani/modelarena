@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Callable
 
 import numpy as np
+import torch
 from threadpoolctl import threadpool_limits
 
 from ml.contracts import (
@@ -21,6 +22,7 @@ from ml.data.splits import _config_digest, verify_manifest
 from ml.evaluation.metrics import metric_direction, oof_diagnostics, score_predictions
 from ml.models.classical import make_classical
 from ml.preprocessing.factory import FoldPreprocessor
+from ml.training.mlp_loop import MLPFoldResult, derive_fold_seed, train_mlp_fold
 
 
 def _subset(view: TrainingView, ids: tuple[int, ...], positions: dict[int, int]) -> TrainingView:
@@ -148,7 +150,8 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
     primary = config.primary_metric or ("f1" if task == TaskType.BINARY_CLASSIFICATION else "rmse")
     direction = metric_direction(task, primary)
     # Validate family/task/seed before beginning any fold work.
-    make_classical(task, config.family, config.model_seed)
+    if config.family != "mlp":
+        make_classical(task, config.family, config.model_seed)
     positions = {row_id: index for index, row_id in enumerate(view.row_ids)}
     folds = []
     oof_points = []
@@ -164,26 +167,52 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
             fit_seconds = score_seconds = 0.0
             stage_started = perf_counter()
             scoring = False
+            mlp_fold_res = None
             try:
-                fit = _subset(view, frozen.fit_row_ids, positions)
-                validation = _subset(view, frozen.validation_row_ids, positions)
-                preprocessor = FoldPreprocessor(config.limits)
-                encoded_fit = preprocessor.fit_transform(fit)
-                model = make_classical(task, config.family, config.model_seed)
-                model.fit(encoded_fit, np.asarray(fit.targets))
-                fit_seconds = perf_counter() - stage_started
-                scoring = True
-                stage_started = perf_counter()
-                encoded_validation = preprocessor.transform(validation)
-                if task == TaskType.BINARY_CLASSIFICATION:
-                    positive_column = np.flatnonzero(model.classes_ == 1)
-                    if len(positive_column) != 1 or set(model.classes_) != {0, 1}:
-                        raise ValueError("Fitting fold requires encoded labels 0 and 1")
-                    score = model.predict_proba(encoded_validation)[:, positive_column[0]]
-                    prediction = (score >= .5).astype(int)
+                if config.family == "mlp":
+                    mlp_fold_res = train_mlp_fold(
+                        view,
+                        frozen,
+                        config,
+                        run_control=cancelled,
+                        holdout_row_ids=split.holdout_row_ids,
+                    )
+                    fit_seconds = mlp_fold_res.fit_seconds
+                    scoring = True
+                    stage_started = perf_counter()
+                    validation = _subset(view, frozen.validation_row_ids, positions)
+                    encoded_validation = mlp_fold_res.preprocessor.transform(validation, dtype=np.float32)
+                    mlp_fold_res.model.eval()
+                    with torch.no_grad():
+                        raw_preds = mlp_fold_res.model(torch.from_numpy(encoded_validation)).squeeze(-1).numpy()
+                    if raw_preds.ndim == 0:
+                        raw_preds = np.expand_dims(raw_preds, 0)
+                    if task == TaskType.BINARY_CLASSIFICATION:
+                        score = 1.0 / (1.0 + np.exp(-np.clip(raw_preds, -88.0, 88.0)))
+                        prediction = (score >= .5).astype(int)
+                    else:
+                        score = None
+                        prediction = raw_preds
                 else:
-                    score = None
-                    prediction = model.predict(encoded_validation)
+                    fit = _subset(view, frozen.fit_row_ids, positions)
+                    validation = _subset(view, frozen.validation_row_ids, positions)
+                    preprocessor = FoldPreprocessor(config.limits)
+                    encoded_fit = preprocessor.fit_transform(fit)
+                    model = make_classical(task, config.family, config.model_seed)
+                    model.fit(encoded_fit, np.asarray(fit.targets))
+                    fit_seconds = perf_counter() - stage_started
+                    scoring = True
+                    stage_started = perf_counter()
+                    encoded_validation = preprocessor.transform(validation)
+                    if task == TaskType.BINARY_CLASSIFICATION:
+                        positive_column = np.flatnonzero(model.classes_ == 1)
+                        if len(positive_column) != 1 or set(model.classes_) != {0, 1}:
+                            raise ValueError("Fitting fold requires encoded labels 0 and 1")
+                        score = model.predict_proba(encoded_validation)[:, positive_column[0]]
+                        prediction = (score >= .5).astype(int)
+                    else:
+                        score = None
+                        prediction = model.predict(encoded_validation)
                 metrics = score_predictions(task, validation.targets, prediction, score)
                 fold_points = tuple(DiagnosticPoint(
                     row_id, frozen.fold_index, float(truth), float(predicted),
@@ -205,7 +234,7 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                                         fit_seconds, score_seconds, "fold_execution_failed"))
             finally:
                 # Do not retain previous fold matrices while allocating the next.
-                encoded_fit = encoded_validation = model = preprocessor = None
+                encoded_fit = encoded_validation = model = preprocessor = mlp_fold_res = None
             on_fold(frozen.fold_index, True)
     result = CandidateResult(task, config.family, config.model_seed, split.manifest_sha256,
                              primary, direction, tuple(f.fold_index for f in split.folds),

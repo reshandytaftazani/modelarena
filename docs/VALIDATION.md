@@ -1,5 +1,34 @@
 # Validation evidence
 
+## Day 16 core acceptance — 2026-10-31
+
+The user requested execution of Day 16 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 16 deliverables are complete and verified locally with zero regressions across the entire test suite.
+
+- **D16a Persisted Inner Indices and Leakage-Free Preprocessing:**
+  - Integrated persisted inner indices (`manifest.inner.fit_row_ids` and `manifest.inner.validation_row_ids`) into `ml/training/mlp_loop.py` and `ml/training/cv.py`.
+  - Implemented `train_mlp_fold` in `ml/training/mlp_loop.py` (and re-exported in `ml/training/cv.py`), executing strict fold boundary isolation.
+  - Verified with row ID spies that `FoldPreprocessor.fit` sees strictly `manifest.inner.fit_row_ids` only. Disjointness guarantees enforce zero inner-validation, zero outer-validation, and zero holdout rows in preprocessing fit or training gradient updates (`isdisjoint` assertions).
+  - Verified that extreme numerical outliers (e.g. 1e9) and unseen categorical sentinels placed exclusively in inner validation do not alter scaler means, standard deviations, or categorical vocabularies (scaler mean matches true inner-fit mean exactly within `1e-5`).
+  - Proved that outer-validation data cannot influence training epochs, loss progression, or early stopping decisions: mutating outer-validation features and inverting targets produces bit-for-bit identical `best_epoch`, `epochs_trained`, `stop_reason`, and model weights.
+  - Protected against holdout access during fold training and CV evaluation via `PoisonHoldout` readers.
+
+- **D16b Best Checkpoint Restoration, Reporting Metadata, and Deterministic Replay:**
+  - Implemented best checkpoint restoration (`model.load_state_dict(best_state_dict)`) in `train_mlp` and `train_mlp_fold`. Verified with scripted loss sequences that the restored model weights strictly match weights from `best_epoch`, not the final epoch (`epochs_trained`).
+  - Added comprehensive fold outcome reporting in `MLPFoldResult`: returns `fold_index`, `best_epoch`, `best_loss`, `stop_reason`, `epochs_trained`, `history` (`EpochLoss` tuples), `inner_fit_row_ids`, `inner_val_row_ids`, `outer_val_row_ids`, `derived_seed`, and `fit_seconds`.
+  - Enforced `min_delta=1e-6` improvement threshold in `train_mlp`: verified that numerical fluctuations below `1e-6` (e.g. 1e-7) do not reset the early stopping patience counter.
+  - Guaranteed deterministic seed replay: `derive_fold_seed(model_seed, family, fold_index)` derives a stable 32-bit unsigned seed; reruns with the same seed yield identical losses, best epoch, and model weights within fixture tolerance (`abs=1e-6`).
+  - Integrated `family="mlp"` into `evaluate_candidate` in `ml/training/cv.py`, enabling CV execution across frozen folds for both binary classification and regression.
+
+- **Test-first and regression evidence:**
+  - Verified RED failure on `tests/integration/test_mlp_leakage.py` before implementation, followed by minimal implementation achieving GREEN.
+  - `uv run pytest tests/integration/test_mlp_leakage.py -q`: **10 passed in 13.03 s**.
+  - Full unit and integration regression suite `uv run pytest tests/unit tests/integration -q`: **478 passed, 0 failures, 0 skips in 365.71 s (0:06:05)**.
+  - `uv lock --check` and `git diff --check` succeeded.
+
+- **Limitations Recorded:**
+  - Per-fold train/validation loss curve persistence and MLflow tracking integration remain scheduled for Day 17.
+  - Full-training refit using median best epoch across CV folds remains scheduled for Day 18.
+
 ## Day 15 core acceptance — 2026-10-31
 
 The user requested execution of Day 15 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 15 deliverables are complete and verified locally with zero regressions across the entire test suite.

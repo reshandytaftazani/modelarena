@@ -98,6 +98,7 @@ Verified delivery as of **2026-10-31**:
 | Day 14 guarded finalization reservation and G2 | Verified locally | 446 tests passed, zero skips; holdout reservation lock, candidate digest validation, dead-child check, post-start evaluation lock, tombstone checks; see [validation evidence](docs/VALIDATION.md#day-14-core-acceptance-and-milestone-g2--2026-10-31) |
 | G2 — Classical experiments | Gate passed locally | Full classical suite, Windows worker recovery/cancel, MLflow tracking, candidate ranking, and durable holdout gate |
 | Day 15 PyTorch CPU foundations | Verified locally | 468 tests passed, zero skips; bounded MLP architecture, task loss selection, deterministic CPU DataLoader (workers=0), train/eval modes, weighted epoch loss, detached state dict, finite-loss guard, and RunControl cancellation; see [validation evidence](docs/VALIDATION.md#day-15-core-acceptance--2026-10-31) |
+| Day 16 strict fold-local early stopping | Verified locally | 478 tests passed, zero skips; inner-fit preprocessor isolation, inner-validation early stopping (patience 10, min_delta 1e-6, max 100 epochs), best checkpoint restoration, zero outer-val/holdout leakage, spy row IDs, and deterministic seed replay; see [validation evidence](docs/VALIDATION.md#day-16-core-acceptance--2026-10-31) |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
