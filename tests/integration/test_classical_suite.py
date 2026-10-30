@@ -42,8 +42,12 @@ def test_spawned_worker_runs_four_families_on_frozen_training_folds(tmp_path, ta
     assert worker.last_child_pid != os.getpid() and worker.last_result["pid"] == worker.last_child_pid
     candidates = worker.last_result["candidates"]
     assert tuple(c["family"] for c in candidates) == classical_families(task)
+    comparison = worker.last_result["comparison"]
+    assert {entry["family"] for entry in comparison["ranked"]} == set(classical_families(task))
+    assert not comparison["unranked"]
     for candidate in candidates:
         assert candidate["eligible"] and candidate["split_sha256"] == prepared.context.split.manifest_sha256
+        assert candidate["diagnostics"]["partition"] == "out_of_fold_training"
         assert len(candidate["folds"]) == 5
         for fold, frozen in zip(candidate["folds"], prepared.context.split.folds, strict=True):
             assert fold["status"] == "completed" and tuple(fold["validation_row_ids"]) == frozen.validation_row_ids
