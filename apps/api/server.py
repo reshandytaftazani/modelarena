@@ -5,6 +5,7 @@ import secrets
 
 import uvicorn
 
+from apps.api.console import enable_console_interrupt
 from apps.api.database.repository import JobRepository
 from apps.api.main import create_app
 from apps.api.settings import load_settings
@@ -27,4 +28,5 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    enable_console_interrupt()
     main()

@@ -6,6 +6,7 @@ import json
 from apps.api.database.repository import ConflictError, JobRepository, NotFoundError
 from apps.api.services.datasets import load_dataset
 from apps.api.services.jobs import PreparedExperiment, prepare_experiment
+from apps.api.services.retention import find_tombstone
 from ml.contracts import DatasetConfig, FeatureColumn, FeatureSchema, FeatureType, ResourceLimits, RunConfig, TaskType, TrainingContext
 from ml.data.splits import parse_manifest, training_from_manifest
 from ml.data.validation import configure_dataset
@@ -22,10 +23,17 @@ def parse_config(raw: dict) -> DatasetConfig:
 def configure(repository: JobRepository, dataset_id: str, config: DatasetConfig,
               split_seed: int, limits: ResourceLimits) -> dict:
     data = load_dataset(repository, dataset_id, limits)
+    tombstone = find_tombstone(repository, data.canonical_sha256, config.target, str(config.task))
+    with repository._connection() as db:
+        marker = db.execute("SELECT m.state FROM evaluation_scopes s JOIN scope_lock_markers m ON m.scope_id=s.scope_id "
+                            "WHERE s.canonical_sha256=? AND s.target=? AND s.task=?",
+                            (data.canonical_sha256, config.target, str(config.task))).fetchone()
+    states = {tombstone, marker[0] if marker else None}
+    holdout_lock = 'consumed' if 'consumed' in states else 'reserved' if 'reserved' in states else None
     prepared = prepare_experiment(repository, data, config, RunConfig(split_seed=split_seed, limits=limits))
     with repository._connection() as db:
         row = db.execute("SELECT configuration_id FROM experiments WHERE experiment_id=?", (prepared.experiment_id,)).fetchone()
-    return {"configuration_id": row[0], "profile": asdict(prepared.profile)}
+    return {"configuration_id": row[0], "profile": asdict(prepared.profile), "holdout_lock": holdout_lock}
 
 
 def configuration(repository: JobRepository, configuration_id: str) -> dict:

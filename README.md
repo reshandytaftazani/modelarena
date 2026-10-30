@@ -8,7 +8,7 @@ ModelArena is a planned local ML experimentation platform for students and devel
 
 > **Day 12 local tracking verified:** classical CV results and bounded out-of-fold diagnostics are privately persisted with checksums, a manifest and local MLflow runs. Final evaluation locks, the dashboard and the full resource benchmark comparison remain planned.
 
-> **Day 13 partial:** the local API supports CSV upload, configuration, CV queueing, job monitoring and CV inspection, with explicit server and worker entrypoints. Deletion remains pending until tracking cleanup and finalization-lock integration are implemented; this is not yet a complete end-to-end product.
+> **Day 13 core verified:** the local API supports CSV upload, configuration, CV queueing, job monitoring and CV inspection, with explicit server and worker entrypoints. The deletion core is fail-closed; confirmed deletion and finalization-lock integration remain scheduled for Days 25 and 14 respectively. This is not yet a complete end-to-end product.
 
 ## Why ModelArena
 
@@ -95,13 +95,13 @@ Verified delivery as of **2026-10-30**:
 | Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
 | Day 11 CV comparison and diagnostics | Verified locally | 387 tests passed, zero skips; persistence completed on Day 12; see [validation evidence](docs/VALIDATION.md#day-11--2026-10-30) |
 | Day 12 local MLflow and atomic publication | Verified locally | 394 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-12--2026-10-30) |
-| Day 13 backend workflow and deletion | Partial | Local server/worker, CV progress and pending deletion/tombstone primitives verified; complete deletion and finalization integration remain pending; see [validation evidence](docs/VALIDATION.md#day-13-runtime-and-retention-follow-up--2026-10-30) |
+| Day 13 backend workflow and deletion core | Verified locally, with later integration pending | API acceptance and deletion-core tests pass; tombstone reupload uses simulated future cleanup; confirmed deletion and finalization integration remain pending. See [validation evidence](docs/VALIDATION.md#day-13-core-acceptance--2026-10-30) |
 | G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
 | G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical CV results are now durably published and tracked locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation and fail-closed recovery. The partial leaderboard API does not complete the workflow; finalization and application usability require later acceptance checks.
+Classical CV results are now durably published and tracked locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover training-only folds, durable queue, spawned worker, tracking, resource monitoring, cancellation and fail-closed recovery. Finalization, complete deletion and application usability require later acceptance checks.
 
 ### Local backend entrypoints
 
@@ -112,7 +112,7 @@ uv run --locked python -m apps.api.server
 uv run --locked python -m apps.api.workers.runner
 ```
 
-The API binds only to `127.0.0.1:8765` and prints a freshly generated session token in its terminal. Treat that terminal output as a secret; send the token in the `X-ModelArena-Token` header and do not share or commit it. Restarting the API changes the token. The worker and API must use the same `MODELARENA_HOME` and resource settings. `--port` changes the API port; a browser origin is denied unless explicitly allowed with `--ui-origin http://localhost:5173`. The `/health` worker status indicates verified recent process presence, not a guarantee that a job can be admitted. `--once` runs at most one queued job; a claimed job that fails returns a nonzero process exit code. Normal worker operation polls until interrupted; interrupted work follows the existing worker recovery rules. Automated tests verified real local startup and a real spawned job, not a full interactive Ctrl+C session.
+The API binds only to `127.0.0.1:8765` and prints a freshly generated session token in its terminal. Treat that terminal output as a secret; send the token in the `X-ModelArena-Token` header and do not share or commit it. Restarting the API changes the token. The worker and API must use the same `MODELARENA_HOME` and resource settings. `--port` changes the API port; a browser origin is denied unless explicitly allowed with `--ui-origin http://localhost:5173`. The `/health` worker status indicates verified recent process presence, not a guarantee that a job can be admitted. `--once` runs at most one queued job; a claimed job that fails returns a nonzero process exit code. Normal worker operation polls until interrupted; interrupted work follows the existing worker recovery rules. Windows tests delivered real console Ctrl+C events to the API, an idle worker and a worker with a spawned job; manual interactive use was not separately tested.
 
 Deletion requests currently return `deletion_pending`: known private files can be removed, but metadata and MLflow copies may remain. A keyed tombstone is prepared for recorded lock markers; the finalization system that must create and enforce those markers is not yet implemented. Do not treat pending as confirmed deletion. See `docs/VALIDATION.md` for limitations.
 

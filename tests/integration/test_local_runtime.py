@@ -8,11 +8,14 @@ import socket
 from time import monotonic, sleep
 
 import httpx
+import psutil
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.database.repository import JobRepository
 from apps.api.main import create_app
 from apps.api.workers.monitor import process_creation_time
+from apps.api.workers.monitor import terminate_owned_child
 
 
 TOKEN = "a" * 43
@@ -135,3 +138,130 @@ def test_worker_once_exit_status_reports_failed_job(tmp_path):
                                 env=dict(os.environ, MODELARENA_HOME=str(tmp_path)), capture_output=True, text=True, timeout=40)
         assert result.returncode != 0
         assert client.get(f'/api/v1/jobs/{job_id}').json()['state'] == 'failed'
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows console control acceptance')
+def test_windows_worker_ctrl_c_cleans_up_presence(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    process = subprocess.Popen([sys.executable, '-m', 'apps.api.workers.runner'],
+                               env=dict(os.environ, MODELARENA_HOME=str(tmp_path)),
+                               creationflags=subprocess.CREATE_NEW_CONSOLE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    worker = None
+    try:
+        deadline = monotonic() + 30
+        while monotonic() < deadline:
+            with repo._connection() as db:
+                worker = db.execute('SELECT pid,process_created FROM worker_presence').fetchone()
+            if worker:
+                break
+            assert process.poll() is None
+            sleep(0.1)
+        assert worker is not None
+        helper = ("import ctypes,sys,time; k=ctypes.WinDLL('kernel32',use_last_error=True); "
+                  "k.FreeConsole(); assert k.AttachConsole(int(sys.argv[1])); "
+                  "assert k.SetConsoleCtrlHandler(None,True); "
+                  "assert k.GenerateConsoleCtrlEvent(0,0); time.sleep(0.5); k.FreeConsole()")
+        sent = subprocess.run([sys.executable, '-c', helper, str(worker['pid'])],
+                              capture_output=True, text=True, timeout=10)
+        assert sent.returncode == 0, sent.stderr
+        assert process.wait(timeout=20) == 130
+        with repo._connection() as db:
+            assert db.execute('SELECT count(*) FROM worker_presence WHERE pid=?', (worker['pid'],)).fetchone()[0] == 0
+    finally:
+        if worker:
+            terminate_owned_child(worker['pid'], creation_time=worker['process_created'], timeout=2)
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=15)
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows console control acceptance')
+def test_windows_api_server_ctrl_c_releases_listener(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    process = subprocess.Popen([sys.executable, '-m', 'apps.api.server', '--port', str(port)],
+                               env=dict(os.environ, MODELARENA_HOME=str(tmp_path)),
+                               creationflags=subprocess.CREATE_NEW_CONSOLE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    child = None
+    try:
+        token_line = process.stdout.readline().strip()
+        assert token_line.startswith('Session token: ')
+        token = token_line.removeprefix('Session token: ')
+        deadline = monotonic() + 20
+        with httpx.Client(trust_env=False, timeout=1) as client:
+            while True:
+                try:
+                    assert client.get(f'http://127.0.0.1:{port}/health', headers={'X-ModelArena-Token': token}).status_code == 200
+                    break
+                except httpx.ConnectError:
+                    assert monotonic() < deadline and process.poll() is None
+                    sleep(0.1)
+        children = psutil.Process(process.pid).children(recursive=True)
+        child = children[-1] if children else psutil.Process(process.pid)
+        child_identity = (child.pid, child.create_time())
+        helper = ("import ctypes,sys,time; k=ctypes.WinDLL('kernel32',use_last_error=True); "
+                  "k.FreeConsole(); assert k.AttachConsole(int(sys.argv[1])); "
+                  "assert k.SetConsoleCtrlHandler(None,True); "
+                  "assert k.GenerateConsoleCtrlEvent(0,0); time.sleep(0.5); k.FreeConsole()")
+        sent = subprocess.run([sys.executable, '-c', helper, str(child.pid)], capture_output=True, text=True, timeout=10)
+        assert sent.returncode == 0, sent.stderr
+        assert process.wait(timeout=20) == 0
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', port))
+    finally:
+        if child:
+            terminate_owned_child(child_identity[0], creation_time=child_identity[1], timeout=2)
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=15)
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows console control acceptance')
+def test_windows_ctrl_c_interrupts_real_spawned_worker_job(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    app = create_app(repo, session_token=TOKEN)
+    csv = ('x,target\n' + '\n'.join(f'{i},{i * 2}' for i in range(100))).encode()
+    with TestClient(app, base_url='http://localhost:8000', headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id = client.post('/api/v1/datasets', files={'file': ('data.csv', csv)}).json()['dataset_id']
+        config_id = client.post(f'/api/v1/datasets/{dataset_id}/configurations', json={
+            'task': 'regression', 'target': 'target', 'features': [{'name': 'x', 'dtype': 'numeric'}]}).json()['configuration_id']
+        experiment_id = client.post('/api/v1/experiments', json={'configuration_id': config_id}).json()['experiment_id']
+        job_id = client.post(f'/api/v1/experiments/{experiment_id}/jobs', json={'idempotency_key': 'ctrl-c'}).json()['job_id']
+        process = subprocess.Popen([sys.executable, '-m', 'apps.api.workers.runner'],
+                                   env=dict(os.environ, MODELARENA_HOME=str(tmp_path)),
+                                   creationflags=subprocess.CREATE_NEW_CONSOLE,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        worker = child = None
+        try:
+            deadline = monotonic() + 30
+            while monotonic() < deadline:
+                with repo._connection() as db:
+                    worker = db.execute('SELECT pid,process_created FROM worker_presence').fetchone()
+                    child = db.execute('SELECT child_pid,child_created FROM worker_processes WHERE child_pid IS NOT NULL').fetchone()
+                if worker and child:
+                    break
+                assert process.poll() is None
+                sleep(0.1)
+            assert worker is not None and child is not None
+            helper = ("import ctypes,sys,time; k=ctypes.WinDLL('kernel32',use_last_error=True); "
+                      "k.FreeConsole(); assert k.AttachConsole(int(sys.argv[1])); "
+                      "assert k.SetConsoleCtrlHandler(None,True); "
+                      "assert k.GenerateConsoleCtrlEvent(0,0); time.sleep(0.5); k.FreeConsole()")
+            sent = subprocess.run([sys.executable, '-c', helper, str(worker['pid'])], capture_output=True, text=True, timeout=10)
+            assert sent.returncode == 0, sent.stderr
+            assert process.wait(timeout=25) == 130
+            assert repo.get_job(job_id).state == 'interrupted'
+            with repo._connection() as db:
+                assert db.execute('SELECT active_job_id FROM worker_lease').fetchone()[0] is None
+                assert db.execute('SELECT count(*) FROM worker_presence WHERE pid=?', (worker['pid'],)).fetchone()[0] == 0
+        finally:
+            if child:
+                terminate_owned_child(child['child_pid'], creation_time=child['child_created'], timeout=2)
+            if worker:
+                terminate_owned_child(worker['pid'], creation_time=worker['process_created'], timeout=2)
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=15)

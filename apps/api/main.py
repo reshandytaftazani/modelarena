@@ -5,23 +5,28 @@ This factory does not start a server or worker. Deletion remains incomplete.
 
 from dataclasses import asdict
 import hmac
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from python_multipart.exceptions import MultipartParseError
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from apps.api.database.repository import ConflictError, JobRecord, JobRepository, NotFoundError
-from apps.api.services.leaderboard import get_candidate, get_leaderboard
+from apps.api.services.leaderboard import Leaderboard, get_candidate, get_leaderboard
 from apps.api.services.datasets import MultipartUpload, UploadError, publish_upload, upload_root
 from apps.api.services.workflow import configuration, configure, create_experiment
 from apps.api.services.retention import deletion_disclosure, request_deletion
 from apps.api.workers.presence import worker_status
-from ml.contracts import DatasetConfig, FeatureColumn, FeatureSchema, FeatureType, ResourceLimits, TaskType
+from apps.api.security import RequestContextMiddleware, error_response
+from ml.contracts import (DatasetConfig, DatasetProfile, FeatureColumn, FeatureSchema, FeatureType,
+                          FoldResult, MetricSummary, OofDiagnostics, ResourceLimits, RunConfig, TaskType)
 from ml.data.validation import CsvValidationError
 
 
@@ -53,6 +58,55 @@ class DatasetResponse(BaseModel):
     columns: tuple[str, ...]
     row_count: int
     byte_count: int
+
+
+class ConfigurationResponse(BaseModel):
+    configuration_id: str
+    profile: DatasetProfile
+    holdout_lock: Literal["reserved", "consumed"] | None
+
+
+class ExperimentResponse(BaseModel):
+    experiment_id: str
+
+
+class CandidateResponse(BaseModel):
+    candidate_id: str
+    task: TaskType
+    family: str
+    model_seed: int
+    split_sha256: str
+    primary_metric: str
+    direction: Literal["maximize", "minimize"]
+    expected_fold_indices: tuple[int, ...]
+    folds: tuple[FoldResult, ...]
+    summary: tuple[MetricSummary, ...]
+    total_seconds: float
+    run_config: RunConfig | None
+    diagnostics: OofDiagnostics | None
+    eligible: bool
+
+
+class DeletionResponse(BaseModel):
+    dataset_id: str
+    state: Literal["deletion_pending"]
+    file_cleanup_failed: bool
+    disclosure: str
+
+
+class DeletionDisclosure(BaseModel):
+    dataset_id: str
+    linked_experiments: int
+    active_jobs: int
+    deletion_pending: bool
+    confirmed_deletion_supported: bool
+    disclosure: str
+
+
+class HealthResponse(BaseModel):
+    api_version: Literal["v1"]
+    storage: Literal["available"]
+    worker: Literal["available", "not_detected", "unknown"]
 
 
 class FeatureInput(BaseModel):
@@ -96,8 +150,11 @@ async def _body(request: Request, schema: type[BaseModel]) -> BaseModel:
         data.extend(chunk)
     try:
         return schema.model_validate_json(data)
-    except ValidationError:
-        raise UploadError("invalid_request") from None
+    except ValidationError as exc:
+        allowed = set(schema.model_fields)
+        fields = sorted({error["loc"][0] for error in exc.errors(include_input=False)
+                         if error["loc"] and error["loc"][0] in allowed})
+        raise UploadError("invalid_request", details=[{"field": field, "code": "invalid"} for field in fields]) from None
 
 
 def _job(repository: JobRepository, record: JobRecord) -> JobResponse:
@@ -105,7 +162,7 @@ def _job(repository: JobRepository, record: JobRecord) -> JobResponse:
 
 
 def _error(status: int, code: str) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": {"code": code}})
+    return error_response(status, code)
 
 
 def _opaque_id(value: str) -> str:
@@ -162,16 +219,23 @@ def create_app(repository: JobRepository, *, session_token: str,
                 "Vary": "Origin"})
         tokens = request.headers.getlist("x-modelarena-token")
         if len(tokens) != 1 or not tokens[0].isascii() or not hmac.compare_digest(tokens[0], session_token):
-            return _error(403, "token_rejected")
+            response = _error(403, "token_rejected")
+            if origin:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
+                response.headers["Vary"] = "Origin"
+            return response
         response = await call_next(request)
         if origin:
             response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
             response.headers["Vary"] = "Origin"
         response.headers["Cache-Control"] = "no-store"
         return response
 
     # Outermost middleware: reject untrusted Host even for preflight requests.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"], www_redirect=False)
+    app.add_middleware(RequestContextMiddleware)
 
     @app.exception_handler(NotFoundError)
     async def not_found(_request: Request, _exc: NotFoundError):
@@ -183,13 +247,21 @@ def create_app(repository: JobRepository, *, session_token: str,
 
     @app.exception_handler(UploadError)
     async def invalid_upload(_request: Request, exc: UploadError):
-        return _error(exc.status, exc.code)
+        return error_response(exc.status, exc.code, exc.details)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_request: Request, exc: StarletteHTTPException):
+        return _error(exc.status_code, "not_found" if exc.status_code == 404 else "http_error")
+
+    @app.exception_handler(RequestValidationError)
+    async def request_error(_request: Request, _exc: RequestValidationError):
+        return _error(422, "invalid_request")
 
     @app.exception_handler(CsvValidationError)
     async def invalid_csv(_request: Request, exc: CsvValidationError):
         return _error(413 if exc.code == "upload_too_large" else 422, exc.code)
 
-    @app.get("/health")
+    @app.get("/health", response_model=HealthResponse)
     def health():
         return {"api_version": "v1", "storage": "available", "worker": worker_status(repository)}
 
@@ -213,18 +285,18 @@ def create_app(repository: JobRepository, *, session_token: str,
             if upload is not None:
                 await run_in_threadpool(upload.cleanup)
 
-    @app.delete("/api/v1/datasets/{dataset_id}", status_code=202)
+    @app.delete("/api/v1/datasets/{dataset_id}", status_code=202, response_model=DeletionResponse)
     async def delete_dataset(dataset_id: str, request: Request):
         body = await _body(request, DeletionInput)
         if not body.acknowledge:
             return _error(422, "acknowledgement_required")
         return await run_in_threadpool(request_deletion, repository, _opaque_id(dataset_id))
 
-    @app.get("/api/v1/datasets/{dataset_id}/deletion-disclosure")
+    @app.get("/api/v1/datasets/{dataset_id}/deletion-disclosure", response_model=DeletionDisclosure)
     def get_deletion_disclosure(dataset_id: str):
         return deletion_disclosure(repository, _opaque_id(dataset_id))
 
-    @app.post("/api/v1/datasets/{dataset_id}/configurations", status_code=201)
+    @app.post("/api/v1/datasets/{dataset_id}/configurations", status_code=201, response_model=ConfigurationResponse)
     async def create_configuration(dataset_id: str, request: Request):
         dataset_id = _opaque_id(dataset_id)
         body = await _body(request, ConfigurationInput)
@@ -238,11 +310,11 @@ def create_app(repository: JobRepository, *, session_token: str,
                 raise
             return _error(422, "invalid_configuration")
 
-    @app.get("/api/v1/configurations/{configuration_id}/profile")
+    @app.get("/api/v1/configurations/{configuration_id}/profile", response_model=DatasetProfile)
     def get_profile(configuration_id: str):
         return configuration(repository, _opaque_id(configuration_id))["profile"]
 
-    @app.post("/api/v1/experiments", status_code=201)
+    @app.post("/api/v1/experiments", status_code=201, response_model=ExperimentResponse)
     async def register_experiment(request: Request):
         body = await _body(request, ExperimentInput)
         try:
@@ -286,11 +358,11 @@ def create_app(repository: JobRepository, *, session_token: str,
         job = await run_in_threadpool(repository.retry_cv, _opaque_id(job_id), body.idempotency_key)
         return await run_in_threadpool(_job, repository, job)
 
-    @app.get("/api/v1/experiments/{experiment_id}/leaderboard")
+    @app.get("/api/v1/experiments/{experiment_id}/leaderboard", response_model=Leaderboard)
     def leaderboard(experiment_id: str):
         return asdict(get_leaderboard(repository, _opaque_id(experiment_id)))
 
-    @app.get("/api/v1/candidates/{candidate_id}")
+    @app.get("/api/v1/candidates/{candidate_id}", response_model=CandidateResponse)
     def candidate(candidate_id: str):
         return get_candidate(repository, _opaque_id(candidate_id))
 

@@ -1,5 +1,16 @@
 # Validation evidence
 
+## Day 13 core acceptance — 2026-10-30
+
+The user requested completion of Day 13. The daily backend API and deletion-core work is verified locally; **this is not verification of finalization, confirmed deletion or a product release**. Day 14 owns the real finalization gate, and Day 25 owns permanent MLflow/metadata cleanup and deletion UI.
+
+- API endpoints now have explicit typed response models. Errors use server-generated request IDs, safe messages, allowlisted field details and a consistent JSON envelope, including bad hosts, unknown routes and sanitized internal errors. Duplicate/malformed Host headers and path traversal are rejected, allowed-origin clients can read error request IDs, and oversized/truncated streamed uploads leave no staging file. The API suite also covers idempotency conflicts and the upload-to-spawned-worker flow. The separate leaderboard suite denies SQL access to a holdout table, including through the HTTP endpoint.
+- Windows console acceptance uncovered an inherited Ctrl+C-ignore flag. The dedicated API and worker entrypoints now restore Ctrl+C handling. Real Windows console events stopped the API and released its listener, stopped an idle worker and removed its presence, and interrupted a running spawned job while releasing the lease. The tests sent console events from a helper process; manual interactive PowerShell use was not separately observed.
+- Retention tests cover queued and running references, a real Windows exclusive file handle and retry, known raw/train/holdout/split/staging/report file cleanup, and a minimal keyed tombstone. A synthetic consumed marker and **test-only simulated metadata cleanup** allow an equivalent CSV reupload to show `holdout_lock=consumed`. This tests the Day 13 retention primitives, not a real finalization gate or end-to-end confirmed deletion. Production deletion still returns `deletion_pending` and may retain metadata and MLflow copies. Day 14 must create and enforce markers atomically; Day 25 must permanently purge and verify all stores before reporting deletion complete.
+- Test-first runs exposed missing error envelopes, duplicate Host acceptance, absent reupload lock reporting and ignored Windows Ctrl+C before the corresponding fixes. `uv run --locked pytest tests/integration/test_api.py -q`: **14 passed in 15.99 s**. `uv run --locked pytest tests/integration/test_retention.py -q`: **13 passed in 5.87 s**. Full `uv run --locked pytest -q`: **436 passed in 205.06 s**, zero skips; two upstream Starlette/MLflow-SQLAlchemy deprecation warnings. `uv lock --check`, `git diff --check` and the ignored AST-only `graphify update .` completed.
+
+The Day 13 daily core is complete within its planned boundaries; G1 remains passed locally and G2–G4 remain pending. The simulated reupload must not be presented as proof that a real holdout cannot be reevaluated, nor as proof of complete deletion.
+
 ## Day 13 runtime and retention follow-up — 2026-10-30
 
 The user requested continuing the remaining work. The checkout began clean on `main` after `e86a844`. The work remains scoped to the backend and retention boundaries; no external data, dependencies or holdout evaluations were introduced.

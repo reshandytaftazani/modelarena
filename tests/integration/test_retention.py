@@ -2,11 +2,12 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+import sys
 
 from fastapi.testclient import TestClient
 import pytest
 
-from apps.api.database.repository import ConflictError, JobRepository
+from apps.api.database.repository import ConflictError, JobRepository, WorkerIdentity
 from apps.api.main import create_app
 from apps.api.services.retention import request_deletion
 
@@ -62,6 +63,49 @@ def test_locked_file_stays_pending_and_retry_is_safe(tmp_path, monkeypatch):
         monkeypatch.setattr(retention, '_remove_file', original)
         assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
         assert not (tmp_path / 'uploads' / dataset_id / 'source.csv').exists()
+
+
+def test_running_job_rejects_deletion_without_recording_intent(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, experiment_id, _ = prepared(client)
+        job_id = client.post(f'/api/v1/experiments/{experiment_id}/jobs', json={'idempotency_key': 'running'}).json()['job_id']
+        claimed = repo.claim_next(WorkerIdentity('test-worker', repo.lease_generation()))
+        assert claimed.job_id == job_id and claimed.state == 'running'
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 409
+        with repo._connection() as db:
+            assert db.execute('SELECT count(*) FROM deletion_intents').fetchone()[0] == 0
+        assert (tmp_path / 'uploads' / dataset_id / 'source.csv').exists()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows exclusive file handle acceptance')
+def test_real_windows_locked_upload_remains_pending_until_handle_closed(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                   wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, _ = prepared(client)
+        path = tmp_path / 'uploads' / dataset_id / 'source.csv'
+        handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+        assert handle != wintypes.HANDLE(-1).value
+        try:
+            response = client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True})
+            assert response.status_code == 202
+            assert response.json()['state'] == 'deletion_pending'
+            assert response.json()['file_cleanup_failed'] is True
+            assert path.exists()
+        finally:
+            kernel.CloseHandle(handle)
+        response = client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True})
+        assert response.json()['file_cleanup_failed'] is False
+        assert not path.exists()
 
 
 def test_schema_v2_migrates_with_existing_datasets(tmp_path):
@@ -143,6 +187,38 @@ def test_consumed_scope_creates_minimal_keyed_tombstone_before_file_purge(tmp_pa
         assert row['scope_hmac'] != identity
 
 
+def test_tombstone_is_detected_after_fixture_metadata_removal_and_equivalent_reupload(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        dataset_id, _, csv = prepared(client)
+        with repo._connection() as db:
+            scope_id = db.execute('SELECT scope_id FROM evaluation_scopes').fetchone()[0]
+            db.execute("INSERT INTO scope_lock_markers VALUES(?, 'consumed')", (scope_id,))
+        assert client.request('DELETE', f'/api/v1/datasets/{dataset_id}', json={'acknowledge': True}).status_code == 202
+
+        # Simulate the later metadata-cleanup phase; it is not implemented by
+        # the Day 13 deletion endpoint, which continues to return pending.
+        with repo._transaction() as db:
+            db.execute('DROP TRIGGER audit_no_delete')
+            db.execute('DELETE FROM audit_events')
+            db.execute('DELETE FROM scope_lock_markers')
+            db.execute('DELETE FROM experiments')
+            db.execute('DELETE FROM configurations')
+            db.execute('DELETE FROM splits')
+            db.execute('DELETE FROM evaluation_scopes')
+            db.execute('DELETE FROM deletion_intents')
+            db.execute('DELETE FROM datasets')
+            db.execute("CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END")
+        uploaded = client.post('/api/v1/datasets', files={'file': ('equivalent.csv', csv.replace(b'\n', b'\r\n'))})
+        assert uploaded.status_code == 201
+        assert uploaded.json()['dataset_id'] != dataset_id
+        config = client.post(f"/api/v1/datasets/{uploaded.json()['dataset_id']}/configurations", json={
+            'task': 'regression', 'target': 'target', 'features': [{'name': 'x', 'dtype': 'numeric'}]})
+        assert config.status_code == 201
+        assert config.json()['holdout_lock'] == 'consumed'
+
+
 def test_unreserved_deletion_creates_no_tombstone_or_key(tmp_path):
     repo = JobRepository(tmp_path / 'metadata.sqlite3')
     with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
@@ -192,13 +268,22 @@ def test_known_private_partition_split_final_and_report_copies_are_removed(tmp_p
     with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
                     headers={'X-ModelArena-Token': TOKEN}) as client:
         dataset_id, experiment_id, _ = prepared(client)
+        job = repo.enqueue_cv(experiment_id, 'terminal-attempt')
+        owner = WorkerIdentity('fixture-worker', repo.lease_generation())
+        claimed = repo.claim_next(owner)
+        assert claimed.job_id == job.job_id
+        repo.finish_job(owner, job.job_id, claimed.attempt_id, state='failed', stage='failed')
+        attempt_id = claimed.attempt_id
         with repo._connection() as db:
             scope_id, split_id = db.execute('SELECT scope_id,split_id FROM configurations WHERE dataset_id=?', (dataset_id,)).fetchone()
         paths = [tmp_path / 'datasets' / scope_id / 'train.csv',
                  tmp_path / 'datasets' / scope_id / 'holdout.csv',
                  tmp_path / 'splits' / f'{split_id}.json',
                  tmp_path / 'final' / scope_id / 'model.bin',
-                 tmp_path / 'reports' / f'{experiment_id}.zip']
+                 tmp_path / 'reports' / f'{experiment_id}.zip',
+                 tmp_path / 'results' / attempt_id / 'result.json',
+                 tmp_path / 'results' / f'staging-{attempt_id}' / 'result.json',
+                 tmp_path / 'jobs' / attempt_id / 'staging' / 'temporary.csv']
         for path in paths:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'private fixture')

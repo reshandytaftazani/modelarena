@@ -13,8 +13,9 @@ from ml.data.csv_io import validate_csv
 
 
 class UploadError(ValueError):
-    def __init__(self, code: str, status: int = 422):
+    def __init__(self, code: str, status: int = 422, *, details: list[dict[str, str]] | None = None):
         self.code, self.status = code, status
+        self.details = details or []
         super().__init__(code)
 
 

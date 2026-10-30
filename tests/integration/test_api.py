@@ -7,10 +7,26 @@ from ml.contracts import TaskType
 from ml.contracts import ResourceLimits
 from apps.api.database.repository import JobRepository
 from apps.api.workers.supervisor import WorkerSupervisor
+from uuid import UUID
 from tests.integration.test_classical_suite import prepared_fixture
 
 
 TOKEN = "a" * 43
+
+
+def test_workflow_routes_publish_explicit_response_models(tmp_path):
+    app = create_app(JobRepository(tmp_path / 'metadata.sqlite3'), session_token=TOKEN)
+    routes = {(route.path, method): route for route in app.routes if hasattr(route, 'methods')
+              for method in route.methods}
+    expected = [('/api/v1/datasets', 'POST'),
+                ('/api/v1/datasets/{dataset_id}/configurations', 'POST'),
+                ('/api/v1/configurations/{configuration_id}/profile', 'GET'),
+                ('/api/v1/experiments', 'POST'),
+                ('/api/v1/experiments/{experiment_id}/jobs', 'POST'),
+                ('/api/v1/jobs/{job_id}', 'GET'),
+                ('/api/v1/experiments/{experiment_id}/leaderboard', 'GET'),
+                ('/api/v1/candidates/{candidate_id}', 'GET')]
+    assert all(routes[item].response_model is not None for item in expected)
 
 
 def test_job_and_empty_leaderboard_with_local_token(tmp_path):
@@ -38,6 +54,10 @@ def test_token_host_and_origin_are_checked(tmp_path):
         assert client.get(url, headers={"X-ModelArena-Token": TOKEN, "Origin": "http://evil.test"}).status_code == 403
         assert client.get(url, headers={"X-ModelArena-Token": TOKEN, "Host": "evil.test"}).status_code == 400
         assert client.get(url, headers={"X-ModelArena-Token": TOKEN, "Origin": "http://localhost:5173"}).status_code == 200
+        rejected = client.get(url, headers={"X-ModelArena-Token": "wrong", "Origin": "http://localhost:5173"})
+        assert rejected.status_code == 403
+        assert rejected.headers['Access-Control-Allow-Origin'] == 'http://localhost:5173'
+        assert 'X-Request-ID' in rejected.headers['Access-Control-Expose-Headers']
 
 
 def test_cancel_rejects_bodies_and_unknown_ids_safely(tmp_path):
@@ -90,6 +110,20 @@ def test_upload_invalid_and_oversized_rejected_without_dataset(tmp_path):
         assert client.post('/api/v1/datasets', files=[('file', ('a.csv', b'a\n1')), ('file', ('b.csv', b'b\n2'))]).status_code == 422
     with repo._connection() as db:
         assert db.execute('SELECT count(*) FROM datasets').fetchone()[0] == 0
+    assert not list((tmp_path / 'uploads').iterdir())
+
+
+def test_streamed_multipart_limit_and_truncation_leave_no_staging_files(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    app = create_app(repo, session_token=TOKEN, limits=ResourceLimits(upload_bytes=64))
+    prefix = b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="x.csv"\r\n\r\n'
+    with TestClient(app, base_url='http://localhost:8000', headers={'X-ModelArena-Token': TOKEN}) as client:
+        response = client.post('/api/v1/datasets', headers={'Content-Type': 'multipart/form-data; boundary=boundary'},
+                               content=iter([prefix, b'x\n', b'a' * 65, b'\r\n--boundary--\r\n']))
+        assert response.status_code == 413
+        response = client.post('/api/v1/datasets', headers={'Content-Type': 'multipart/form-data; boundary=boundary'},
+                               content=iter([prefix, b'x\n1\n']))
+        assert response.status_code == 422
     assert not list((tmp_path / 'uploads').iterdir())
 
 
@@ -191,3 +225,47 @@ def test_worker_rejects_source_replaced_after_queue(tmp_path):
         assert worker.last_child_pid is None
         assert client.get(f'/api/v1/jobs/{job_id}').json()['state'] == 'failed'
         assert client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').json()['ranked'] == []
+
+
+def test_all_error_responses_have_safe_request_ids_and_envelopes(tmp_path, monkeypatch):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    app = create_app(repo, session_token=TOKEN)
+    with TestClient(app, base_url='http://localhost:8000') as client:
+        requests = [
+            client.get('/health'),
+            client.get('/health', headers={'Host': 'evil.test', 'X-ModelArena-Token': TOKEN}),
+            client.get('/api/v1/missing', headers={'X-ModelArena-Token': TOKEN}),
+            client.post('/api/v1/experiments', headers={'X-ModelArena-Token': TOKEN}, json={'configuration_id': 42, 'secret-value': 'hidden'}),
+        ]
+        for response in requests:
+            assert response.status_code >= 400
+            payload = response.json()['error']
+            assert set(payload) == {'code', 'message', 'details', 'request_id'}
+            assert str(UUID(payload['request_id'])) == payload['request_id']
+            assert response.headers['X-Request-ID'] == payload['request_id']
+            assert 'hidden' not in response.text and 'secret-value' not in response.text
+        assert len({response.headers['X-Request-ID'] for response in requests}) == len(requests)
+        assert requests[-1].json()['error']['details'] == [{'field': 'configuration_id', 'code': 'invalid'}]
+
+        def fail(_):
+            raise RuntimeError('secret-path-and-private-value')
+        monkeypatch.setattr(repo, 'get_job', fail)
+        response = client.get('/api/v1/jobs/00000000-0000-0000-0000-000000000001', headers={'X-ModelArena-Token': TOKEN})
+        assert response.status_code == 500
+        assert response.json()['error']['code'] == 'internal_error'
+        assert 'secret-path-and-private-value' not in response.text
+
+
+def test_invalid_host_header_and_encoded_traversal_are_rejected(tmp_path):
+    repo = JobRepository(tmp_path / 'metadata.sqlite3')
+    with TestClient(create_app(repo, session_token=TOKEN), base_url='http://localhost:8000',
+                    headers={'X-ModelArena-Token': TOKEN}) as client:
+        for host in ('localhost.evil.test', '127.0.0.1.evil.test', 'evil.test:80',
+                     'localhost:notaport', 'localhost:70000', 'localhost:', 'localhost:1:2'):
+            assert client.get('/health', headers={'Host': host}).status_code == 400
+        for path in ('/api/v1/jobs/%2e%2e%2fmetadata.sqlite3', '/api/v1/datasets/%2e%2e%2fmetadata.sqlite3/deletion-disclosure'):
+            response = client.get(path)
+            assert response.status_code == 404
+            assert 'metadata.sqlite3' not in response.text
+        duplicate_host = client.get('/health', headers=[('Host', 'localhost'), ('Host', 'evil.test')])
+        assert duplicate_host.status_code == 400

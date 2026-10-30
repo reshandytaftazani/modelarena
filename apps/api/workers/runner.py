@@ -6,6 +6,7 @@ from time import sleep
 from uuid import uuid4
 
 from apps.api.database.repository import JobRepository
+from apps.api.console import enable_console_interrupt
 from apps.api.settings import load_settings
 from apps.api.workers.presence import WorkerPresence
 from apps.api.workers.supervisor import WorkerSupervisor
@@ -35,4 +36,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    enable_console_interrupt()
     raise SystemExit(main())
