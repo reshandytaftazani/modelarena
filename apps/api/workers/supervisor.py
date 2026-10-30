@@ -28,13 +28,17 @@ import multiprocessing
 import os
 from queue import Empty
 from time import perf_counter, sleep
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from apps.api.database.repository import (
     ConflictError, JobRecord, JobRepository, WorkerIdentity, render_telemetry_event,
 )
 from apps.api.workers import control, execute, monitor
 from ml.contracts import ResourceLimits
+
+if TYPE_CHECKING:
+    from apps.api.services.jobs import PreparedExperiment
+    from ml.contracts import RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +77,7 @@ class WorkerSupervisor:
         limits: ResourceLimits | None = None,
         workload: str = "probe",
         workload_options: Mapping[str, Any] | None = None,
+        classical_input: tuple[PreparedExperiment, RunConfig] | None = None,
         heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
         sample_seconds: float = DEFAULT_SAMPLE_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -88,6 +93,9 @@ class WorkerSupervisor:
         self.limits = limits
         self.workload = control.check_workload(workload)
         self.options = control.validate_options(self.workload, dict(workload_options or {}))
+        if (self.workload == "classical") != (classical_input is not None):
+            raise ValueError("Classical workload requires trusted prepared input")
+        self.classical_input = classical_input
         self.heartbeat_seconds = _interval(heartbeat_seconds, "heartbeat", 0.05, 60)
         self.sample_seconds = monitor.check_interval(sample_seconds)
         self.poll_seconds = _interval(poll_seconds, "poll", 0.01, 5)
@@ -131,9 +139,22 @@ class WorkerSupervisor:
         assert job.attempt_id is not None
         try:
             self.repository.record_progress(self.owner, job.job_id, "starting")
+            if self.workload == "classical":
+                from apps.api.services.jobs import PreparedExperiment
+                from ml.contracts import RunConfig
+                try:
+                    prepared, run = self.classical_input
+                    if (not isinstance(prepared, PreparedExperiment) or not isinstance(run, RunConfig)
+                            or prepared.experiment_id != job.experiment_id or run.limits != self.limits):
+                        raise ValueError("Classical input does not match job")
+                    self.repository.verify_classical_input(job.experiment_id, prepared.context, run)
+                except (ConflictError, TypeError, ValueError) as exc:
+                    # Input mismatch is a failed job, not loss of worker ownership.
+                    raise ValueError("Invalid classical input") from exc
             outcome = self._spawn_and_wait(job, job.attempt_id)
         except ConflictError:
             # The slot moved underneath us; publish nothing.
+            self.last_result = None
             logger.warning("Ownership lost for job %s; no result published", job.job_id)
             return self.repository.get_job(job.job_id)
         except KeyboardInterrupt:
@@ -163,6 +184,7 @@ class WorkerSupervisor:
                 self.last_result = None
             return final
         except ConflictError:
+            self.last_result = None
             logger.warning("Stale supervisor refused publication for job %s", job.job_id)
             return self.repository.get_job(job.job_id)
 
@@ -193,6 +215,8 @@ class WorkerSupervisor:
             target=execute.child_main,
             args=(job.job_id, attempt_id, self._child_limits(), self.workload,
                   dict(self.options), messages, self._cancel_event, start_event),
+            kwargs=({"classical_input": (self.classical_input[0].context, self.classical_input[1])}
+                    if self.classical_input is not None else {}),
             name=f"modelarena-exec-{job.job_id[:8]}",
             daemon=False,
         )

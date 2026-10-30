@@ -1,5 +1,23 @@
 # Validation evidence
 
+## Day 10 — 2026-10-30
+
+The user requested Day 10, English output, commit and push. Work continued on `feat/day-7-durable-queue`; the starting checkout was clean at `c33ffca`. No dependencies, lockfiles, user data, dataset downloads, holdout scoring or frontend work were added.
+
+The closed registry now supplies Dummy, LogisticRegression/Ridge, RandomForest and HistGradientBoosting for the relevant task, with the specified bounded defaults and HGB early stopping disabled. The suite serially evaluates each candidate against the same frozen outer folds using fresh guarded fold-local preprocessing, selects binary probability column 1 and reports fit/score timings and safe fold failures. Failed and partial candidates remain ineligible. Cancellation is checked between folds and candidates; the existing supervisor also handles cancellation during native fits.
+
+The classical worker accepts internally prepared training-only input and verifies its experiment, split, configuration and run metadata against the queued immutable records before spawning. It does not accept a client path or estimator, and the child receives no holdout contents. Source-content provenance still depends on the trusted `prepare_experiment` / `training_from_manifest` boundary, not on reconstructing a manually modified training view. The current supervisor accepts one supplied prepared experiment, fails closed on a different queued job, and returns results only in `last_result` memory. Job completion does **not** mean candidate results were durably published: private source loading, candidate publication, MLflow tracking and leaderboard operations remain future work. The existing job deadline applies; a separate classical per-fold deadline is not implemented.
+
+Verification on Windows and the existing locked environment:
+
+- Test-first: the new registry and suite commands initially failed collection because their new interfaces/modules did not exist. After implementation, the registry and suite each passed.
+- The first full regression run found **2 failures, 365 passes**: the new optional input had changed the probe child call signature used by the native-fit cancellation tests. The supervisor now passes that input only for the classical workload; the lifecycle and classical integration suites then passed **26 tests**, zero skips.
+- Final `uv run --locked pytest -q`: **369 passed in 146.37 s**, zero skips. Named commands, rerun separately: `uv run --locked pytest tests/unit/test_classical_models.py -q` — **5 passed in 7.01 s**; `uv run --locked pytest tests/integration/test_classical_suite.py -q` — **7 passed in 37.24 s**.
+- Real Windows-spawned children completed all four families on both synthetic tasks using five shared folds. Tests also check fresh fold-only preprocessing for all 20 fits, finite model outputs, safe failed-family visibility and ineligibility, deterministic cancellation between candidates, real worker cancellation and a second supervisor blocked by the occupied slot. The frozen-input mismatch is rejected before child spawn. Fixture outcomes are not named-dataset or performance evidence.
+- `uv lock --check` passed. `graphify update .` refreshed the ignored AST graph; its labels and semantic documentation may require a later refresh.
+
+G1 remains passed locally; G2–G4 and release remain pending. No model was selected or evaluated on the holdout, no baseline-win or benchmark claim is made, and no P0 requirement was removed.
+
 ## Day 9 — 2026-10-27
 
 The user authorized Day 9 implementation, English output, commit and push, and chose the existing `feat/day-7-durable-queue` branch. The clean baseline was `4edf0f2`; `uv run --locked pytest -q` passed **336 tests in 38.20 s**, zero skips. No dependencies, lockfiles, downloads, frontend or holdout evaluation changed. Days 10–28 remain pending.

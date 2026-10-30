@@ -1,12 +1,14 @@
-"""Serial Dummy CV on persisted identities; never imports a holdout reader.
+"""Serial classical CV on persisted identities; never imports a holdout reader.
 
-This is an ordinary ML function for the future execution child, not an API
-request handler. Worker cancellation, hard native-fit deadlines and durable
-publication are later milestones. Resource guards apply in every fold now.
+This is an ordinary ML function for the execution child, not an API request
+handler. The supervisor handles native-fit cancellation and the job deadline;
+durable candidate publication remains a later milestone. Resource guards apply
+in every fold.
 """
 
 from dataclasses import replace
 from time import perf_counter
+from typing import Callable
 
 import numpy as np
 from threadpoolctl import threadpool_limits
@@ -48,8 +50,9 @@ def summarize_candidate(result: CandidateResult) -> tuple[MetricSummary, ...]:
     return tuple(summary)
 
 
-def evaluate_candidate(context: TrainingContext, config: RunConfig) -> CandidateResult:
-    """Fit a fresh guarded preprocessor + Dummy on each complete outer-fit set."""
+def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
+                       cancelled: Callable[[], bool] = lambda: False) -> CandidateResult:
+    """Fit a fresh guarded preprocessor and estimator on each outer-fit set."""
     started = perf_counter()
     if not isinstance(context, TrainingContext) or not isinstance(config, RunConfig):
         raise TypeError("TrainingContext and RunConfig required")
@@ -67,6 +70,11 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig) -> Candidate
     with threadpool_limits(limits=config.limits.compute_threads, user_api="blas"), \
             threadpool_limits(limits=1, user_api="openmp"):
         for frozen in split.folds:
+            if cancelled():
+                # Lazy import avoids a module cycle; never translate cancellation
+                # into a failed fold or publish a partial candidate.
+                from ml.training.classical_suite import SuiteCancelled
+                raise SuiteCancelled()
             fit_seconds = score_seconds = 0.0
             stage_started = perf_counter()
             scoring = False

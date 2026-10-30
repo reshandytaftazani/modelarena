@@ -71,6 +71,7 @@ _PROBE_OPTIONS = (
 #: tests; nothing is resolved from a client-supplied path or import string.
 WORKLOADS: Mapping[str, tuple[WorkloadOption, ...]] = {
     "probe": _PROBE_OPTIONS,
+    "classical": (),
 }
 
 PROBE_DEFAULTS: Mapping[str, Any] = {
@@ -94,7 +95,7 @@ def validate_options(name: str, options: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(options) - set(declared)
     if unknown:
         raise ValueError("Unknown workload option")
-    merged = dict(PROBE_DEFAULTS)
+    merged = dict(PROBE_DEFAULTS) if name == "probe" else {}
     merged.update(options)
     for key, option in declared.items():
         value = merged[key]

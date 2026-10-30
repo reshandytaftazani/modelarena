@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 9 worker recovery](https://img.shields.io/badge/status-day_9_worker_recovery-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 10 classical suite](https://img.shields.io/badge/status-day_10_classical_suite-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 9 verified locally:** the spawned single-slot worker now supports cooperative cancellation, bounded forced termination, transactional cancel/result arbitration, process-identity-based restart reconciliation and explicit CV retry using frozen inputs. Unknown ownership or a live orphan blocks new fitting. Dataset cross-validation inside the worker, tracking, final evaluation locks and the full benchmark comparison remain planned.
+> **Day 10 verified locally:** all four classical families per task run on frozen training-only folds in a spawned, single-slot worker using internally prepared inputs. Cancellation, restart fencing and incomplete-candidate eligibility checks remain in place. Results are currently in memory only; durable tracking/publication, final evaluation locks and the full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -77,7 +77,7 @@ The Windows Python environment and CPU-only torch wheel have passed the Day 1 sm
 
 ## Development roadmap
 
-Verified delivery as of **2026-10-27**:
+Verified delivery as of **2026-10-30**:
 
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
@@ -90,12 +90,13 @@ Verified delivery as of **2026-10-27**:
 | Day 7 SQLite metadata and durable queue | Committed | G1 acceptance: 310 tests passed, zero skips; `4b3ca13`; see [validation evidence](docs/VALIDATION.md#day-7--2026-10-26) |
 | Day 8 Windows-safe spawned worker | Committed | 336 tests passed, zero skips; real Windows children at T=2/4/6, no mocks; see [validation evidence](docs/VALIDATION.md#day-8--2026-10-26) |
 | Day 9 cancellation and restart reconciliation | Committed | 357 tests passed, zero skips; real native-fit cancellation, orphan blocking, fencing and retry; see [validation evidence](docs/VALIDATION.md#day-9--2026-10-27) |
-| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass; the spawned worker still runs a synthetic probe, not dataset CV |
-| G2 — Classical experiments | Not started | Acceptance pending |
+| Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
+| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
+| G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Nine daily work packages are verified locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover the data/Dummy path, durable queue, spawned worker, resource monitoring, cancellation and fail-closed recovery. The full candidate suite, dataset CV inside the child, tracking and application usability require later acceptance checks.
+Ten daily work packages are verified locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover the classical suite, training-only folds, durable queue, spawned worker, resource monitoring, cancellation and fail-closed recovery. Durable candidate publication, tracking and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 

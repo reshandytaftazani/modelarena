@@ -1,6 +1,6 @@
 # Experiment protocol
 
-This document describes the implemented boundaries through Day 6, including exact metrics and training-only Dummy CV. Other model families, tracking, durable evaluation-scope locks, worker lifecycle and final evaluation remain later work. The local split manifest is an integrity record, not a completed tracked experiment.
+This document describes implemented data, metric and training-only CV boundaries through Day 10. Durable tracking, candidate publication, final evaluation locks and final evaluation remain later work. The local split manifest is an integrity record, not a completed tracked experiment.
 
 ## Configure before splitting
 
@@ -92,3 +92,11 @@ uv run --locked pytest tests/integration/test_baseline_cv.py -q
 ```
 
 These small offline fixtures verify mechanics and exact rerun metrics, not benchmark performance, named-demo baseline wins, hard runtime/RSS enforcement, tracking, a durable leaderboard or final holdout evaluation.
+
+## Day 10 classical suite
+
+The closed registry contains Dummy, LogisticRegression or Ridge, RandomForest, and HistGradientBoosting for the appropriate task. LogisticRegression uses `max_iter=1000`; Ridge uses `alpha=1` and the dense `svd` solver; forests use 100 trees, maximum depth 16, minimum leaf size 2 and `n_jobs=1`. HGB uses 100 iterations with `early_stopping=False`. Randomized estimators receive the fixed model seed. Every model uses a fresh guarded dense preprocessor fitted on the outer training fold; binary probabilities explicitly select encoded positive label 1.
+
+The spawned worker accepts only an internally prepared `PreparedExperiment` and `RunConfig`, checks their experiment, configuration, split and run metadata against the queued immutable record, and passes only the training view and split metadata to the child. This is a trusted internal boundary, not an upload endpoint or an independent verification of manually constructed training contents. The context must originate from `prepare_experiment` / `training_from_manifest`; persisted raw dataset loading remains future work. A supervisor instance is supplied one prepared experiment and fails closed if it claims a different one. The suite runs serially, checks cancellation between folds and candidates, records separate fold fit and score times, and returns failed folds with safe codes and ineligible candidates. The supervisor discards cancelled or stale results.
+
+Results currently exist only in the supervisor's memory; a completed job means execution completed, not that candidates are durably published. Persistent candidate bundles, MLflow tracking, leaderboard comparisons, per-fold deadline enforcement and end-to-end dataset storage remain future work. No holdout evaluation or named-dataset performance claim follows from these synthetic fixtures.

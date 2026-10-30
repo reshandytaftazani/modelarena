@@ -9,10 +9,9 @@ stage enables exactly one T-wide compute layer:
 * Torch stage: torch intra-op T, inter-op one, BLAS and OpenMP pinned to one.
 
 Reporting the pools per stage is how the tests prove there is no nested T-wide
-pair. The ``probe`` workload exists so process identity, heartbeat, progress and
-resource limits can be exercised for real without training on user data. Dataset
-CV execution is wired in with the classical registry (Days 10-12); nothing here
-reads a dataset, a holdout partition or a user path.
+pair. The ``probe`` workload exercises the process without user data. The
+classical workload receives an internally prepared training-only context; it
+never opens a dataset, a holdout partition or a user-supplied path.
 """
 
 import os
@@ -139,6 +138,7 @@ def child_main(
     queue,
     cancel_event=None,
     start_event=None,
+    classical_input=None,
 ) -> None:
     """Run one workload and report a bounded result. Never returns data rows."""
     del job_id, attempt_id  # Identifiers are for supervisor logs only.
@@ -154,6 +154,21 @@ def child_main(
                 threadpool_limits(limits=1, user_api="openmp"):
             if workload == "probe":
                 result = _probe(checked, queue, compute_threads, cancel_event)
+            elif workload == "classical":
+                from dataclasses import asdict
+                from ml.training.classical_suite import SuiteCancelled, evaluate_classical_suite
+
+                context, run = classical_input
+                _emit(queue, PROGRESS, stage="fitting")
+                try:
+                    candidates = evaluate_classical_suite(
+                        context, run, cancelled=cancel_event.is_set if cancel_event is not None else lambda: False,
+                    )
+                except SuiteCancelled:
+                    return
+                result = {"pid": os.getpid(), "workload": "classical", "candidates": [
+                    {**asdict(candidate), "eligible": candidate.eligible} for candidate in candidates
+                ]}
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:
@@ -163,6 +178,6 @@ def child_main(
 
     if cancel_event is not None and cancel_event.is_set():
         return
-    if checked["crash_exit_code"]:
+    if workload == "probe" and checked["crash_exit_code"]:
         os._exit(checked["crash_exit_code"])
     _emit(queue, RESULT, payload=result)

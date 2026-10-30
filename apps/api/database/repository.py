@@ -20,7 +20,7 @@ from uuid import uuid4
 from apps.api.database.schema import SCHEMA_SQL, SCHEMA_VERSION, WORKER_PROCESSES_SQL
 from apps.api.workers.monitor import process_liveness
 from apps.api.workers.control import check_safe_error, check_stage, check_state
-from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType
+from ml.contracts import DatasetConfig, DatasetProfile, RunConfig, SplitManifest, TaskType, TrainingContext
 from ml.data.csv_io import ValidatedDataset
 from ml.data.splits import _config_digest, manifest_json, verify_manifest
 from ml.evaluation.metrics import metric_direction
@@ -268,6 +268,25 @@ class JobRepository:
             _audit(db, "service", experiment_id, "experiment_registered")
         logger.info("Experiment registered: %s", experiment_id)
         return experiment_id
+
+    def verify_classical_input(self, experiment_id: str, context: TrainingContext, run: RunConfig) -> None:
+        """Match trusted, already prepared training input to immutable job metadata.
+
+        This is not a source-content verifier: callers must obtain the context
+        from the trusted prepare_experiment/training_from_manifest boundary.
+        """
+        if not isinstance(context, TrainingContext) or not isinstance(run, RunConfig):
+            raise ValueError("Trusted training context and run required")
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT e.run_json, c.config_json, s.manifest_json FROM experiments e "
+                "JOIN configurations c ON c.configuration_id=e.configuration_id "
+                "JOIN splits s ON s.split_id=c.split_id WHERE e.experiment_id=?", (experiment_id,),
+            ).fetchone()
+        if (row is None or row[0] != _json(asdict(run))
+                or row[1] != _json(asdict(context.training.config))
+                or row[2] != manifest_json(context.split)):
+            raise ConflictError("Classical input does not match frozen experiment")
 
     def enqueue_cv(self, experiment_id: str, idempotency_key: str) -> JobRecord:
         _text(experiment_id)
