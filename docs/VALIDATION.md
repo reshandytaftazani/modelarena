@@ -1,5 +1,158 @@
 # Validation evidence
 
+## Day 10 — 2026-10-30
+
+The user requested Day 10, English output, commit and push. Work continued on `feat/day-7-durable-queue`; the starting checkout was clean at `c33ffca`. No dependencies, lockfiles, user data, dataset downloads, holdout scoring or frontend work were added.
+
+The closed registry now supplies Dummy, LogisticRegression/Ridge, RandomForest and HistGradientBoosting for the relevant task, with the specified bounded defaults and HGB early stopping disabled. The suite serially evaluates each candidate against the same frozen outer folds using fresh guarded fold-local preprocessing, selects binary probability column 1 and reports fit/score timings and safe fold failures. Failed and partial candidates remain ineligible. Cancellation is checked between folds and candidates; the existing supervisor also handles cancellation during native fits.
+
+The classical worker accepts internally prepared training-only input and verifies its experiment, split, configuration and run metadata against the queued immutable records before spawning. It does not accept a client path or estimator, and the child receives no holdout contents. Source-content provenance still depends on the trusted `prepare_experiment` / `training_from_manifest` boundary, not on reconstructing a manually modified training view. The current supervisor accepts one supplied prepared experiment, fails closed on a different queued job, and returns results only in `last_result` memory. Job completion does **not** mean candidate results were durably published: private source loading, candidate publication, MLflow tracking and leaderboard operations remain future work. The existing job deadline applies; a separate classical per-fold deadline is not implemented.
+
+Verification on Windows and the existing locked environment:
+
+- Test-first: the new registry and suite commands initially failed collection because their new interfaces/modules did not exist. After implementation, the registry and suite each passed.
+- The first full regression run found **2 failures, 365 passes**: the new optional input had changed the probe child call signature used by the native-fit cancellation tests. The supervisor now passes that input only for the classical workload; the lifecycle and classical integration suites then passed **26 tests**, zero skips.
+- Final `uv run --locked pytest -q`: **369 passed in 146.37 s**, zero skips. Named commands, rerun separately: `uv run --locked pytest tests/unit/test_classical_models.py -q` — **5 passed in 7.01 s**; `uv run --locked pytest tests/integration/test_classical_suite.py -q` — **7 passed in 37.24 s**.
+- Real Windows-spawned children completed all four families on both synthetic tasks using five shared folds. Tests also check fresh fold-only preprocessing for all 20 fits, finite model outputs, safe failed-family visibility and ineligibility, deterministic cancellation between candidates, real worker cancellation and a second supervisor blocked by the occupied slot. The frozen-input mismatch is rejected before child spawn. Fixture outcomes are not named-dataset or performance evidence.
+- `uv lock --check` passed. `graphify update .` refreshed the ignored AST graph; its labels and semantic documentation may require a later refresh.
+
+G1 remains passed locally; G2–G4 and release remain pending. No model was selected or evaluated on the holdout, no baseline-win or benchmark claim is made, and no P0 requirement was removed.
+
+## Day 9 — 2026-10-27
+
+The user authorized Day 9 implementation, English output, commit and push, and chose the existing `feat/day-7-durable-queue` branch. The clean baseline was `4edf0f2`; `uv run --locked pytest -q` passed **336 tests in 38.20 s**, zero skips. No dependencies, lockfiles, downloads, frontend or holdout evaluation changed. Days 10–28 remain pending.
+
+Delivered:
+
+- Queued cancellation without spawn; running cancellation via a multiprocessing Event, five-second cooperative grace, then verified-child termination/join and two-second kill fallback. KeyboardInterrupt joins the active child, records interruption and preserves waiting jobs.
+- SQLite transaction arbitration: cancellation persisted before completion prevents success; an already committed completion stays completed. Noncompleted attempts invalidate candidate status and discard in-memory result payloads, including late cancellation after result receipt.
+- Schema v2 adds per-attempt supervisor/child PID and exact creation identity; an atomic v1 migration preserves existing metadata and queued jobs. The child cannot begin its workload before its identity is durably registered and its start gate opens.
+- Recovery requires both supervisor and registered child to be verified dead before interruption, generation advancement and slot release. A live supervisor or orphan, stale heartbeat alone, inaccessible identity, legacy ownership or spawn-registration gap cannot authorize new fitting. No automatic orphan termination or force-unlock is provided.
+- Explicit whole-CV retry reuses the immutable experiment, configuration and split, creates a new job/attempt, and retains the previous terminal record. Old attempts and stale generations cannot publish. Reopening the repository (the available API-restart boundary) does not stop active execution.
+
+Test-first evidence included failures for cancel arbitration, cooperative exit, KeyboardInterrupt handling, missing recovery/retry contracts, generation fencing, candidate invalidation, late result cancellation and unobservable-child cleanup before implementation. The updated Day 8 crash assertion now expects `interrupted`, as required by the Day 9 lifecycle; allowlisted workload exceptions remain `failed`.
+
+Fresh verification before review: `uv run --locked pytest -q` -> **356 passed in 64.11 s**, zero skips. The 20 new lifecycle tests include a real spawned scikit-learn HistGradientBoosting fit interrupted within ten seconds, cooperative exit without termination, actual supervisor/child termination, no-overlap restart, migration and fail-closed ownership. Synthetic fixtures only; no performance benchmark or named demonstration claim.
+
+Independent read-only review found no Critical issues, one Important issue and no new minors: cancellation polling followed a configurable heartbeat that could reach 60 seconds. A regression using a real native fit and 60-second heartbeat failed with a 12-second timeout before the fix. Cancellation now polls independently at 0.2 seconds and bounds the monitoring sleep even with a five-second poll setting. Final checkout suite: `uv run --locked pytest -q` -> **357 passed in 72.59 s**, zero skips. The native-fit deadline regression passes at both short and maximum heartbeat/poll settings. The reviewer did not independently rerun the suite; its deterministic reproduction and the implementer's RED→GREEN run are separate evidence. Earlier staged export also passed 356 tests before this fix; final staged verification is recorded below when executed.
+
+Review boundaries: future CV/leaderboard/MLflow/bundle integration remains out of Day 9 scope and requires its later acceptance tests. Public documentation was checked by the implementer, not the code reviewer. `uv lock --check` passed without lock changes. `graphify update .` refreshed the ignored AST code graph; semantic documentation nodes were not refreshed, and community labels may need a later relabel.
+
+Final staged-tree verification: exported the exact index with `git checkout-index --all` into a fresh approved temporary directory, then ran `uv run --project <export> --directory <export> --locked pytest -q` using the existing locked environment via `UV_PROJECT_ENVIRONMENT`: **357 passed in 68.68 s**, zero skips. This verifies staged source independently of the checkout, not a fresh dependency installation. Only README's delivery-state wording and this evidence paragraph were added afterward. Explicit source/test/documentation paths were staged; local plans, graph output, generated data and artifacts remain ignored. No merge, PR or release is implied by committing/pushing Day 9.
+
+Execution decisions: use the existing ignored per-day ledger for the daily-heading plan; block on live orphan/unknown ownership rather than automatically killing or guessing. This favors safety over automatic recovery; missing identity requires operator investigation. The historical direct-SQL nullable-generation CHECK minor remains deferred; repository claim validation and recovery fencing do not treat missing ownership as safe. Dataset CV, MLflow/bundle reconciliation, HTTP lifecycle routes and UI remain assigned to later days. G1 remains passed locally; G2–G4 and release acceptance remain pending.
+
+## Day 8 — 2026-10-26
+
+The user authorized Day 8 implementation, English output, commit and push, continuing on the existing checkout and branch `feat/day-7-durable-queue`. No dependency, lockfile, frontend scaffold, network dataset fetch or holdout evaluation was added. Days 9–28 remain unimplemented.
+
+Delivered:
+
+- `apps/api/workers/control.py`: a shared, import-light vocabulary for stages, terminal states and safe error codes, plus a typed workload registry. Stages and error codes are closed allowlists because they are persisted and rendered; free text, paths and exception messages cannot enter them. An unknown workload name or option key is rejected before any process is spawned, so no client-supplied path or import string is ever resolved.
+- `apps/api/workers/monitor.py`: the single definition of normalized CPU (100% means all logical processors, so one busy core of twelve is ~8.3%), sampled child RSS/CPU plus system-available memory, a continuous-breach memory-pressure tracker, and `terminate_owned_child`, which compares the `psutil` creation time before signalling and returns `False` for an unverified PID. A recycled PID can therefore never be killed.
+- `apps/api/workers/execute.py`: the spawn entrypoint. Module scope imports no numeric library, and `apply_thread_environment` runs before the first numerical import. Each measurement stage enables exactly one T-wide layer — BLAS at T with OpenMP and torch intra-op pinned to one, then torch intra-op at T with BLAS and OpenMP pinned to one — and reports both stages so nesting cannot hide inside one snapshot. A deliberate workload failure emits only the closed code `workload_failed`; the exception text never crosses the process boundary.
+- `apps/api/workers/supervisor.py`: `run_once` claims at most one job, spawns exactly one non-daemon child through the `spawn` context, samples it, heartbeats on its own timer independently of child progress, enforces the RSS cap, the continuous system-reserve breach and the job deadline, and publishes one terminal transition. Publication requires the verified attempt owner and attempt id, so a stale supervisor cannot overwrite a result. A cancel request observed while the job is still running ends it as `cancelled` instead of publishing success. Publication degrades rather than escaping: unrenderable telemetry is dropped so the job still reaches a terminal state and releases the slot. The parent never imports a numeric library and never fits.
+- `apps/api/database/repository.py`: `lease_generation`, `cancel_requested`, `heartbeat`, `record_progress`, `finish_job` and the ownership guard. Every worker write re-verifies job state, owner token, generation and the singleton slot inside the same short `BEGIN IMMEDIATE` transaction. `finish_job` releases the slot atomically with the terminal state and appends a numbers-only telemetry event to the append-only audit trail; a non-numeric or non-finite telemetry value is rejected rather than stored.
+- `scripts/benchmark.py` now imports the shared `normalized_cpu_percent` instead of duplicating the formula, so the probe and the worker cannot drift apart.
+- The deferred Day 7 schema minor was re-examined and deliberately **not** changed. Rebuilding the released `jobs` table to add an `IS NOT NULL` clause is a destructive migration outside Day 8's scope; the repository path always writes a validated positive generation, and the constraint belongs with the Day 9 schema work that already touches worker state.
+
+Verification executed on Windows 11, Python 3.12.15, 6 physical / 12 logical processors, using the existing locked environment (`uv 0.13.5`):
+
+| Command / check | Observed result |
+|---|---|
+| Spawn feasibility probe before implementation | A real spawned child ran and reported a different PID under pytest on Windows |
+| Thread-pool probe before implementation | At T=2/4/6, BLAS, OpenMP and torch intra-op were confirmed controllable; the probe exposed that torch's intra-op pool defaults to the physical core count and ignored `OMP_NUM_THREADS`, which the implementation then pinned explicitly |
+| New worker suites before implementation | Collection failed with `ModuleNotFoundError: apps.api.workers`, confirming the tests exercised absent code |
+| `uv run --locked pytest tests/integration/test_worker_spawn.py -q` | 11 passed, zero skips (10.2–11.5 s) |
+| `uv run --locked pytest tests/integration/test_resource_monitoring.py -q` | 15 passed, zero skips (18.3–19.4 s) |
+| Both new suites together | 26 passed, zero skips, repeated eight times (26.3–28.8 s) |
+| Full regression `uv run --locked pytest -q` | **336 passed, zero skips** in every run; observed wall time 36.9–48.4 s across dozens of consecutive runs after the final code change |
+| `uv lock --check` / `git diff --check` | Both exited 0; Git's CRLF normalization notices are not whitespace errors |
+
+Observed real-process evidence, not mocks:
+
+- A completed job's `pid` differs from the supervising process, `parent_pid` equals it, and the persisted lease slot is released with no job left `running`.
+- Progress stages (`starting`, `preparing`, `fitting`) are readable from SQLite while the child is still running, not only after it finishes.
+- Heartbeat timestamps keep changing while the child emits nothing for 1.5 s, proving heartbeats do not depend on child progress.
+- Two supervisors racing for two queued jobs produce a maximum of one `running` row, exactly one claim and one completion; the second job stays queued.
+- Database reads from the supervising process stay responsive (mean well under 100 ms) throughout a 1.2 s child fit.
+- At T=2/4/6 a real spawned child reports `torch_intra_threads == T`, `torch_interop_threads == 1`, exactly one T-wide pool per stage, and every other pool at one thread.
+- A reduced test-only 256 MiB cap with a 512 MiB allocation fails the job as `memory_limit_exceeded`, terminates the child, releases the slot and creates no candidate row. The production cap remains 4 GiB.
+- A 1 s job deadline against a 30 s workload is persisted as `timeout` in under 20 s.
+- A child exiting with code 7 is persisted as `child_exited` with no partial result.
+- A secret string injected into a deliberate workload failure appears in neither the persisted job/audit rows nor the captured logs; only `workload_failed` is stored.
+- An unverified PID is never terminated, and a verified owned child is.
+- A cancel requested while the job is running now finishes as `cancelled` with `safe_error = cancelled` and no `job_completed` audit event, rather than publishing success for abandoned work. This test was written first and failed with `completed` before the fix.
+- Unrenderable telemetry no longer strands a job: with the audit renderer forced to reject a value, the job still reaches `completed`, the slot is released and the telemetry event is simply absent. This test was also written first and failed with the raw `ValueError` escaping publication before the fix, which would have left the job `running` and the queue blocked.
+
+Known limitations of this milestone, stated so they are not mistaken for delivered features:
+
+- The child runs the internal synthetic `probe` workload. Dataset cross-validation inside the spawned child arrives with the classical registry on Days 10–12; no user data, holdout partition or trained artifact is involved in these tests.
+- Cancellation is a single check on the heartbeat cadence with no cooperative grace period, no `Event`, and no complete cancel-versus-result arbitration matrix. Queued cancellation already worked from Day 7. Full lifecycle handling, interruption recovery, stale-owner reconciliation and restart behaviour remain Day 9.
+- Resource limits are sampled, so a transient RSS spike between samples can be missed. This is a soft cap, not an OS-enforced quota, and it does not justify a final thread or memory policy.
+- No MLflow tracking, candidate publication, API transport, dashboard, or holdout evaluation exists yet; the supervisor is a library called by tests, not a running background service.
+
+## Day 7 — 2026-10-26
+
+The user authorized Day 7 implementation, English output, commit and push, and chose the current checkout on a new branch (`feat/day-7-durable-queue`). No dependencies, frontend scaffold, network dataset fetch or holdout evaluation were added. Days 8–28 remain unimplemented.
+
+Delivered:
+
+- Version-one local application SQLite schema, WAL, per-connection foreign keys and FULL synchronous commits. Immutable dataset/configuration/split/experiment records include hashes, frozen run limits, explicit task/positive label, duplicate acknowledgement and a training-only profile. Split JSON preserves outer/inner row identities; feature/target records are not stored. Schema also reserves candidates and the singleton worker lease; this is separate from MLflow.
+- Parameterized enqueue/claim/cancel operations with short `BEGIN IMMEDIATE` transactions. Idempotency keys are globally unique and compare immutable experiment payload identity; retries return the original job even after reopening or filling the queue. Waiting queue defaults to ten, with lower frozen limits supported. Claims are FIFO, create unique attempts and bind the owner/generation and singleton slot in the same transaction as their audit event. A unique index additionally prohibits two running jobs.
+- Queued cancellation is terminal and never claimable. Running cancellation persists intent without releasing the slot. Repeated cancellation and terminal-job cancellation are no-ops. Safe logs contain generated IDs, not keys, raw records or private paths. Audit events are append-only while records are retained; later retention work must explicitly handle their controlled deletion.
+- Bounded contention policy: a five-second SQLite busy timeout per BEGIN attempt, at most two retries (three attempts total, roughly fifteen seconds plus scheduler overhead). Tests lower this to 25 ms with one retry without relaxing production limits. Transactions roll back job, lease and audit together on injected failures.
+- Temporary-store integration for binary classification and regression: mixed numeric/categorical input with missing features, frozen split JSON round trip, saved configuration/run/profile metadata, training-only views, explicit test-driven Dummy evaluation on five folds and deterministic score summaries. Poison holdout records reject any CV indexing of reserved rows. Duplicate fixtures include full-row repeats and identical features with different labels; acknowledgement is required before any dataset/experiment metadata is persisted.
+
+Verification executed on Windows, Python 3.12 and the existing locked environment:
+
+| Command / check | Observed result |
+|---|---|
+| Baseline `uv run --locked pytest -q` | 277 passed in 12.89 s, zero skips |
+| Initial queue tests before implementation | Collection failed because `apps.api.database` did not exist |
+| First implemented queue suite | 14 passed in 4.58 s, zero skips |
+| Expanded queue and integration checks | 31 passed, two integration fixture failures; missing numeric values plus repeated categories had unintentionally created duplicate features. Corrected the fixture, not the duplicate policy. |
+| `uv run --locked pytest tests/unit tests/integration/test_data_flow.py tests/integration/test_baseline_cv.py tests/integration/test_job_repository.py -q` | 310 passed in 15.14 s, zero skips |
+| Full regression `uv run --locked pytest -q` | 310 passed in 13.24 s, zero skips |
+| `uv lock --check` / `git diff --check` | Both exited 0 |
+| `graphify update .` | AST-only update completed; graph artifacts remain ignored. Community labels may need refreshing; no paid/API extraction was run. |
+
+**G1 data-correctness gate passes locally.** This does not establish a working background process or a release. Day 7's integration explicitly calls CV from test code; preparing or enqueueing an experiment never runs training. Candidate publication, MLflow verification, worker execution/heartbeats, stale-owner liveness checks, cancellation of native fitting and terminal result transitions belong to Days 8–12. The initial lease generation is one; no expiry-based takeover is permitted. Final holdout reservation and one-time evaluation remain Days 14/19. Upload path persistence, HTTP transport and retention are not implemented by these metadata primitives.
+
+Initial resource decision: retain **provisional T=4 and 4 GiB RSS**, with all existing caps unchanged. The actual Day 2 probe recorded 5.29885 s total wall time, 152.36 MiB peak sampled process RSS and 4.8202 GiB minimum sampled available RAM. It was a small battery-powered parser/Dummy probe, not a full classical/MLP or usability benchmark; it cannot justify raising/lowering limits or selecting a final thread count. Day 21's 2/4/6 comparison remains required.
+
+Independent read-only review approved Day 7 with **no Critical/Important findings** and independently reran the 310-test G1 gate and 33-test Day 7 suite, with zero skips. One minor is deferred: SQLite's running-job `CHECK` accepts NULL `owner_generation` when written directly through SQL, because a NULL CHECK expression is not false. The implemented claim path always writes a validated positive generation; no repository-path failure was found. Add an explicit `IS NOT NULL` constraint and regression when extending worker state/schema. This does not authorize treating malformed ownership as safe during recovery.
+
+Review scope decisions: native cancellation/liveness/recovery remain Days 8–9; tracking/publication remains Day 12; finalization crash boundaries remain Days 14/19; complete deletion remains Days 13/25. Existing Day 3/5 duplicate/preprocessing checks were rerun in G1 and their service boundaries reviewed; this is not a new exhaustive audit of those modules. None of these future features is claimed as delivered. If their later integration bypasses the recorded boundaries, G1 alone cannot establish overall safety.
+
+Commit verification: `4b3ca13` — `feat(jobs): persist idempotent single-worker queue and experiment metadata`. All seven new implementation/test files were staged explicitly, and the complete staged diff and whitespace checks were reviewed. The full suite passed again immediately before commit: **310 passed in 14.69 s, zero skips**. Only README and this evidence file remained modified afterward; runtime/user data and local planning/graph files were not staged. A following documentation commit publishes the verified delivery and G1 status. Remote push is verified separately after these commits, not presumed from local commits.
+
+## Day 6 — 2026-10-26
+
+The user authorized Day 6 implementation, English output, commit and push, and chose a new branch in the existing checkout: `feat/day-6-metrics-baseline-cv`. The starting tree was clean and its full suite passed **226 tests**, zero skips. No dependencies changed or datasets were downloaded. Only small offline synthetic fixtures were fitted; no holdout scoring, named demonstration, performance benchmark or release gate was run. Day 7 onward remains unimplemented.
+
+Delivered:
+
+- Frozen metric/CV result contracts and preselected task-specific primary metrics in `RunConfig`.
+- Exact binary precision, recall, F1, fixed-order confusion matrix, ROC-AUC and non-interpolated AP; encoded positive label 1, inclusive 0.5 probability threshold, aligned finite bounded scores. Undefined metrics are null with reasons. A no-positive-prediction baseline with actual positives retains F1=0 despite null precision.
+- Regression MAE, RMSE and R2; constant-target and single-sample R2 are explicitly null rather than coerced to a finite sklearn default. Unrepresentable arithmetic fails safely.
+- A bounded Dummy-only classical factory and serial frozen-fold evaluator using fresh Day 5 guarded preprocessing, training-only global-ID mapping, separate fit/score/total timings, complete-fold means and population standard deviations (`ddof=0`). Failed, missing or duplicate folds and undefined primary scores cannot rank. No partial-fold mean is published; undefined secondary scores do not invalidate a valid primary.
+- Protocol/README updates. Generated Graphify files are ignored; `graphify update .` succeeded after implementation. No generated dataset, model or runtime report is committed.
+
+Executed evidence:
+
+- Metrics tests first failed because `ml.evaluation` did not exist, then passed **37 tests**. One test fixture was corrected because its prediction contradicted its supplied 0.6 probability and the fixed threshold.
+- CV tests first failed because `TrainingContext` did not exist, then passed **14 integration tests**. Tests guard both held-out feature and target indexing, verify original fold identities and exactly five results, inspect fresh outer-fit-only preprocessing, hand-check the regression mean baseline, distinguish population/sample std, verify exact rerun metrics and reject partial/failed/undefined-primary results. Memory rejection produces failed folds, never scores.
+- `uv run pytest -q`: **277 passed in 11.91 s, zero skips**, including all 226 prior tests.
+- Independent read-only review reran all **277 tests** and separately exercised validation-only categories with entirely missing numeric/categorical columns. It found no Critical or Important issues.
+- `uv lock --check` and `git diff --check` exited 0; Git's CRLF normalization notices are not whitespace errors.
+
+Final pre-commit verification on the completed source: `uv run --locked pytest tests/unit/test_metrics.py -q` — **37 passed in 3.37 s**; `uv run --locked pytest tests/integration/test_baseline_cv.py -q` — **14 passed in 5.92 s**; `uv run --locked pytest -q` — **277 passed in 10.29 s**, all with zero skips. Lock and whitespace checks also passed. The requested delivery is a new remote branch, not a merge to `main` or a release; its commit identifier is available in Git history.
+
+Nonblocking review Minor, deferred: fold failures currently share the safe `fold_execution_failed` code. Ranking is safe and raw exception text is suppressed, but categorized resource/data/execution diagnostics would make remediation easier. Detailed safe diagnostics belong with later worker/tracking integration; this limitation is not a claim of production-ready error reporting.
+
+Execution decisions: use direct D6a/D6b tasks and a local ignored ledger rather than task-extraction scripts for standalone numbered plans (bookkeeping only). Continue to defer worker cancellation, hard native-fit deadlines, durable publication and additional classical families to their assigned days; this evaluator is not exposed on an API request thread. The source-content identity boundary remains `training_from_manifest`; the evaluator rechecks configuration/manifest/row identity, not raw dataset fingerprints from manually constructed views. In-progress documentation was checked separately by the implementer. G1 remains blocked on Day 7; G2–G4 remain unpassed.
+
 ## Day 1 — 2026-10-22
 
 Scope authorized by the user's request to implement Day 1 only. Day 2 onward, frontend scaffolding, training, benchmarks and dataset downloads were not executed. The user confirmed 2–3 focused hours per day.

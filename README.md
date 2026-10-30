@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 5 fold preprocessing](https://img.shields.io/badge/status-day_5_fold_preprocessing-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 10 classical suite](https://img.shields.io/badge/status-day_10_classical_suite-64748b?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a planned local ML experimentation platform for students and developers working with tabular data. It will bring scikit-learn models and a small PyTorch neural network into one workflow, making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Day 5 verified locally:** Fold-local imputation, scaling and one-hot encoding now provide guarded dense outputs, building on frozen splits and training-only profiles. The dashboard, API server, production training workflows, durable evaluation locks and full benchmark comparison remain planned.
+> **Day 10 verified locally:** all four classical families per task run on frozen training-only folds in a spawned, single-slot worker using internally prepared inputs. Cancellation, restart fencing and incomplete-candidate eligibility checks remain in place. Results are currently in memory only; durable tracking/publication, final evaluation locks and the full benchmark comparison remain planned.
 
 ## Why ModelArena
 
@@ -77,7 +77,7 @@ The Windows Python environment and CPU-only torch wheel have passed the Day 1 sm
 
 ## Development roadmap
 
-Verified delivery as of **2026-10-26**:
+Verified delivery as of **2026-10-30**:
 
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
@@ -86,12 +86,17 @@ Verified delivery as of **2026-10-26**:
 | Day 3 task validation and training profiles | Committed | 150 tests passed, zero skips; `d58159f`; see [validation evidence](docs/VALIDATION.md#day-3--2026-10-26) |
 | Day 4 immutable splits and fold feasibility | Committed | 205 tests passed, zero skips; `64a8804`; see [validation evidence](docs/VALIDATION.md#day-4--2026-10-26) |
 | Day 5 fold-local preprocessing and memory guards | Committed | 226 tests passed, zero skips; see [validation evidence](docs/VALIDATION.md#day-5--2026-10-26) |
-| G1 — Data correctness | In progress; gate not passed | Days 1–5 complete; Days 6–7 pending |
-| G2 — Classical experiments | Not started | Acceptance pending |
+| Day 6 exact metrics and Dummy CV | Committed | 277 tests passed, zero skips; `2b4d8b4`; see [validation evidence](docs/VALIDATION.md#day-6--2026-10-26) |
+| Day 7 SQLite metadata and durable queue | Committed | G1 acceptance: 310 tests passed, zero skips; `4b3ca13`; see [validation evidence](docs/VALIDATION.md#day-7--2026-10-26) |
+| Day 8 Windows-safe spawned worker | Committed | 336 tests passed, zero skips; real Windows children at T=2/4/6, no mocks; see [validation evidence](docs/VALIDATION.md#day-8--2026-10-26) |
+| Day 9 cancellation and restart reconciliation | Committed | 357 tests passed, zero skips; real native-fit cancellation, orphan blocking, fencing and retry; see [validation evidence](docs/VALIDATION.md#day-9--2026-10-27) |
+| Day 10 classical suite | Verified locally | 369 tests passed, zero skips; real spawned both-task suites on frozen folds; see [validation evidence](docs/VALIDATION.md#day-10--2026-10-30) |
+| G1 — Data correctness | Gate passed locally | Data/leakage/split/Dummy integration and transactional queue checks pass |
+| G2 — Classical experiments | In progress | Tracking, leaderboard and finalization acceptance pending |
 | G3 — MLP and resource evidence | Not started | Acceptance pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Five daily work packages are complete; **0/4 milestone gates have passed**. Current tests cover setup, parsing, task validation, training-only profiles, frozen partitions, fold-local preprocessing, allocation guards and initial instrumentation; the complete leakage-safe ML pipeline, worker resource enforcement, and application usability require later acceptance checks.
+Ten daily work packages are verified locally; **G1 has passed locally; G2–G4 remain pending**. Current tests cover the classical suite, training-only folds, durable queue, spawned worker, resource monitoring, cancellation and fail-closed recovery. Durable candidate publication, tracking and application usability require later acceptance checks.
 
 The target is **28 focused workdays, approximately 75 hours**, including five hours of contingency and release verification. These are work sessions, not a commitment to 28 consecutive calendar days. Training and benchmark runtime is tracked separately; the schedule may extend to meet correctness and reliability gates.
 
@@ -131,7 +136,7 @@ npm.cmd ci --ignore-scripts
 
 The root npm manifest locks the toolchain only; no frontend exists yet. `npm --prefix apps/web ci` becomes applicable on Day 22. Python dependencies use exact direct pins and the transitive `uv.lock`; torch comes from the explicit [CPU wheel index](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
-Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The 4 GiB child RSS cap and other policy-v1 settings are configuration contracts; worker enforcement and performance validation arrive in later tasks.
+Settings default to `%LOCALAPPDATA%/ModelArena` on Windows and `$XDG_DATA_HOME/modelarena` or `~/.local/share/modelarena` elsewhere. `MODELARENA_HOME` may override this with an absolute directory on a local, unsynchronized disk. Network shares and common synchronized-folder paths are rejected; the operator must also avoid other sync tools. Settings imports create no files. The inventory command writes `inventory/hardware.json` under application home, outside the checkout by default, with observed available RAM, power scheme, package versions, and lock checksums. `MODELARENA_COMPUTE_THREADS` accepts 2, 4, or 6; the default is 4. The supervisor now enforces the 4 GiB child RSS cap, the 4 GiB system reserve and the 45-minute job deadline against a sampled child process; the sampled peak can understate a transient spike, so this is a soft cap rather than an OS quota. The 2/4/6-thread performance comparison remains a later acceptance task.
 
 Read the [project specification](docs/PROJECT_SPEC.md) for detailed requirements, evaluation rules, and the definition of done.
 
@@ -153,4 +158,10 @@ Day 4 adds `create_split(parsed, config, RunConfig())`, canonical JSON persisten
 
 The lower-level `training_view(configured, row_ids)` remains a trusted internal helper. Do not expose it to arbitrary client indices or use profile statistics to fit preprocessing. Persisted files do not yet provide the durable evaluation-scope lock, which remains later work. Grouped/temporal evaluation remains unsupported, and duplicate acknowledgement does not establish row independence.
 
-This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Worker termination, API responsiveness, and the full 2/4/6-thread comparison remain later acceptance tasks.
+This small probe does not select a final resource policy. Four compute threads and a 4 GiB RSS cap remain provisional. Days 8–9 add spawned execution, sampled resource enforcement, cooperative/forced cancellation and restart reconciliation; the full 2/4/6-thread performance comparison remains a later acceptance task.
+
+### Worker recovery boundary
+
+These are internal developer interfaces, not HTTP endpoints or a finished application CLI. `WorkerSupervisor.run_once()` reconciles the persisted slot before claiming a queued job. A verified dead supervisor **and** registered dead child allow interruption and a new fencing generation. A live supervisor, live orphan, inaccessible process identity, legacy running job without process identity, or crash during child registration blocks new fitting; heartbeat age never releases the slot. Do not clear lease rows or assume a PID identifies the same process after restart. Inspect the persisted PID and exact creation time and verify the old execution has exited before trying reconciliation again. Missing identity requires manual investigation; no unsafe force-unlock API is provided.
+
+`request_cancel(job_id)` cancels waiting work without spawning. For active work, the supervisor signals an Event, allows up to five seconds for cooperative exit, then terminates/joins the verified child with a two-second kill fallback. Terminal publication requires child death; cancellation committed before success publication wins. `retry_cv(job_id, new_idempotency_key)` explicitly requeues an unsuccessful terminal CV job using its existing immutable experiment and split; it never resumes a partial fold. Candidate/result bundles and their atomic publication remain later work.

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
+import math
 
 
 class TaskType(StrEnum):
@@ -379,6 +380,8 @@ class RunConfig:
     split_seed: int = 42
     model_seed: int = 42
     limits: ResourceLimits = field(default_factory=ResourceLimits)
+    family: str = "dummy"
+    primary_metric: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -389,3 +392,98 @@ class RunConfig:
                 raise ValueError(f"{name} must be an unsigned 32-bit integer")
         if not isinstance(self.limits, ResourceLimits):
             raise ValueError("limits must be ResourceLimits")
+        if not isinstance(self.family, str) or not self.family:
+            raise ValueError("Model family must be nonempty")
+        if self.primary_metric is not None and self.primary_metric not in (
+            "f1", "average_precision", "rmse", "mae",
+        ):
+            raise ValueError("Unsupported primary metric")
+
+
+@dataclass(frozen=True, slots=True)
+class MetricValue:
+    name: str
+    value: float | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricBundle:
+    """Confusion matrix uses actual rows/predicted columns, label order (0, 1)."""
+
+    task: TaskType
+    sample_count: int
+    metrics: tuple[MetricValue, ...]
+    confusion_matrix: tuple[tuple[int, int], tuple[int, int]] | None = None
+
+    def get(self, name: str) -> MetricValue:
+        for metric in self.metrics:
+            if metric.name == name:
+                return metric
+        raise KeyError(name)
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingContext:
+    """Training records and frozen split metadata only; no holdout contents/path.
+
+    Construct the view with training_from_manifest at the trusted data boundary.
+    The evaluator rechecks the manifest checksum, configuration and row IDs.
+    """
+
+    training: TrainingView
+    split: SplitManifest
+
+
+@dataclass(frozen=True, slots=True)
+class FoldResult:
+    fold_index: int
+    validation_row_ids: tuple[int, ...] = field(repr=False)
+    status: str
+    metrics: MetricBundle | None
+    fit_seconds: float
+    score_seconds: float
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSummary:
+    name: str
+    mean: float | None
+    std: float | None
+    valid_folds: int
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateResult:
+    task: TaskType
+    family: str
+    model_seed: int
+    split_sha256: str
+    primary_metric: str
+    direction: str
+    expected_fold_indices: tuple[int, ...]
+    folds: tuple[FoldResult, ...]
+    summary: tuple[MetricSummary, ...]
+    total_seconds: float
+
+    @property
+    def complete(self) -> bool:
+        return (bool(self.expected_fold_indices)
+                and tuple(f.fold_index for f in self.folds) == self.expected_fold_indices
+                and all(f.status == "completed" and f.metrics is not None for f in self.folds))
+
+    @property
+    def eligible(self) -> bool:
+        """Derive eligibility from actual folds, never a cached success flag."""
+        if not self.complete:
+            return False
+        for fold in self.folds:
+            try:
+                value = fold.metrics.get(self.primary_metric).value
+            except KeyError:
+                return False
+            if value is None or not math.isfinite(value):
+                return False
+        return True

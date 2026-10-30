@@ -1,6 +1,6 @@
 # Experiment protocol
 
-This document describes the implemented data, partition and preprocessing boundaries through Day 5. Candidate model fitting, durable evaluation-scope locks, worker lifecycle and final evaluation remain later work. The local split manifest is an integrity record, not a completed experiment.
+This document describes implemented data, metric and training-only CV boundaries through Day 10. Durable tracking, candidate publication, final evaluation locks and final evaluation remain later work. The local split manifest is an integrity record, not a completed tracked experiment.
 
 ## Configure before splitting
 
@@ -73,3 +73,30 @@ Numeric columns use median imputation, retaining all-missing columns with zero, 
 Training-only category counts include a missing category only when present. Enforce at most 100 categories per column and 2,048 total encoded features. The 512 MiB budget reserves `(fit_rows + transform_rows) * encoded_width * (8 + 8 + 4) * 3` bytes: float64 working/copy buffers, a float32 cast buffer, and a three-times safety factor. Fit admission uses `transform_rows = fit_rows`. Each later transform checks its row count against fitted width before encoder allocation. Realized width is checked after fit and matrix shape/budget after transform, before explicit sparse-to-dense conversion. Outputs are finite float64 by default; requesting float32 also checks its finite range before casting.
 
 The estimate assumes serial processing with one retained fit matrix; callers must release prior validation outputs before producing another. It is not an OS memory quota and does not cover model-specific allocations or arbitrary matrices retained by a caller. Process RSS enforcement and resource-pressure recovery remain future worker work. No candidate training, MLP integration, holdout scoring or performance benchmark is claimed by these unit checks.
+
+## Day 6 metrics and Dummy CV
+
+Construct `TrainingContext(training_from_manifest(configured, manifest), manifest)` at the trusted data boundary, then call `evaluate_candidate(context, RunConfig())`. The context has training records and split metadata only, never holdout contents or a holdout path. The evaluator verifies the manifest checksum, configuration digest, exact ordered training IDs and split seed. It maps original global IDs to training-only positions and reuses every persisted outer fold without resplitting. Source-content provenance remains the responsibility of `training_from_manifest`; constructing a view manually is not proof of provenance.
+
+Each fold fits a fresh guarded `FoldPreprocessor` and `DummyClassifier(strategy="prior")` or `DummyRegressor(strategy="mean")` on the complete outer fitting partition. Validation transforms reuse those fitted statistics. Classification explicitly selects the probability column corresponding to encoded label 1 and predicts 1 at probability **>=0.5**, including ties. No threshold tuning is performed. CV is serial with BLAS bounded by the run's compute-thread setting and OpenMP bounded to one. Fit timing includes preprocessing and estimator fitting; score timing includes validation transformation, prediction and metrics. Total wall time is separate. No API endpoint invokes this routine yet; future execution belongs in the separate worker.
+
+`score_predictions` returns finite scalars or null values with reasons. Precision, recall and F1 use their own denominators; no positive predictions with actual positives gives F1=0, recall=0 and null precision. Confusion matrix rows are actual labels, columns predicted labels, both ordered `(0, 1)`. ROC-AUC and average precision require both labels and probability scores; AP is non-interpolated average precision, not trapezoidal PR area. Score vectors must align, be finite, lie in [0,1] and agree with fixed-threshold predictions. Regression reports MAE, RMSE and R2; R2 is null for constant targets or fewer than two samples. Invalid inputs or unrepresentable arithmetic fail rather than returning NaN/inf.
+
+Freeze `RunConfig.primary_metric` before evaluation: `f1` (default) or `average_precision` for binary classification, `rmse` (default) or `mae` for regression. Larger classification scores are better; smaller RMSE/MAE are better. Every expected fold must finish and have a finite primary score to be eligible. Undefined secondary precision never invalidates a finite F1 baseline. Each summary uses the arithmetic mean and population standard deviation (`ddof=0`) over every required fold; if a metric is undefined in any fold, its summary is null, with valid-fold count and reason. Failed/missing/repeated folds never yield partial ranking means. Safe fold errors omit raw exception text; detailed durable diagnostics are future worker/tracking work.
+
+Verification:
+
+```powershell
+uv run --locked pytest tests/unit/test_metrics.py -q
+uv run --locked pytest tests/integration/test_baseline_cv.py -q
+```
+
+These small offline fixtures verify mechanics and exact rerun metrics, not benchmark performance, named-demo baseline wins, hard runtime/RSS enforcement, tracking, a durable leaderboard or final holdout evaluation.
+
+## Day 10 classical suite
+
+The closed registry contains Dummy, LogisticRegression or Ridge, RandomForest, and HistGradientBoosting for the appropriate task. LogisticRegression uses `max_iter=1000`; Ridge uses `alpha=1` and the dense `svd` solver; forests use 100 trees, maximum depth 16, minimum leaf size 2 and `n_jobs=1`. HGB uses 100 iterations with `early_stopping=False`. Randomized estimators receive the fixed model seed. Every model uses a fresh guarded dense preprocessor fitted on the outer training fold; binary probabilities explicitly select encoded positive label 1.
+
+The spawned worker accepts only an internally prepared `PreparedExperiment` and `RunConfig`, checks their experiment, configuration, split and run metadata against the queued immutable record, and passes only the training view and split metadata to the child. This is a trusted internal boundary, not an upload endpoint or an independent verification of manually constructed training contents. The context must originate from `prepare_experiment` / `training_from_manifest`; persisted raw dataset loading remains future work. A supervisor instance is supplied one prepared experiment and fails closed if it claims a different one. The suite runs serially, checks cancellation between folds and candidates, records separate fold fit and score times, and returns failed folds with safe codes and ineligible candidates. The supervisor discards cancelled or stale results.
+
+Results currently exist only in the supervisor's memory; a completed job means execution completed, not that candidates are durably published. Persistent candidate bundles, MLflow tracking, leaderboard comparisons, per-fold deadline enforcement and end-to-end dataset storage remain future work. No holdout evaluation or named-dataset performance claim follows from these synthetic fixtures.
