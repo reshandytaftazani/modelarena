@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 19 verified locally](https://img.shields.io/badge/status-day_19_verified_locally-16a34a?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 20 verified locally](https://img.shields.io/badge/status-day_20_verified_locally-16a34a?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a local-first ML experimentation platform in development for students and developers working with tabular data. Its backend combines scikit-learn models and a small PyTorch neural network, with the goal of making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Current status: Day 19 final evaluation and report generator verified locally.** One-time holdout execution, durable reservation gate, crash recovery/fencing, and self-contained offline report generator ZIP packages (HTML/JSON/inline-SVG) are implemented and verified locally. G1 and G2 passed locally; G3 and G4 remain pending. See [validation evidence](docs/VALIDATION.md#day-19b-acceptance--escaped-offline-report-generator-and-zip-packaging--2026-11-01).
+> **Current status: Day 20 reproducibility fixtures and seed study verified locally (review-pending).** Repeated complete 5-fold CV under identical seeds, threads, and configs achieves abs=1e-6/rel=1e-5 metric tolerance (actual max deviation: 0.0) with timings excluded. Fixed-fold three-model-seed study (42/43/44) for classical and MLP models distinguishes model seeds from split seeds with zero holdout access. Frozen Day 21 workloads and thread trial policy assertions prepared. G1 and G2 passed locally; G3 and G4 remain pending. See [validation evidence](docs/VALIDATION.md#day-20-acceptance--reproducibility-fixtures-tolerance-bounds-and-seed-study--2026-11-01).
 
 ## Why ModelArena
 
@@ -103,12 +103,13 @@ Verified delivery as of **2026-11-01**:
 | Day 18 full-training refit and internal artifacts | Committed | 12 acceptance tests passed, zero skips; `c183294`; fresh classical/MLP refit, complete-fold epoch policy and private checksummed artifacts. See [validation evidence](docs/VALIDATION.md#day-18-refit--module-level-fixture-verification-2026-10-31) and [model cards](docs/MODEL_CARDS.md) |
 | Day 19a guarded final evaluation and crash recovery | Committed | 30 owning tests, 113 regression batch, 9 review tests passed, zero skips; `5b96a86`; one-time HoldoutCapability, durable plan binding, payload schema validation, worker mixed dispatch; see [validation evidence](docs/VALIDATION.md#day-19a-acceptance--final-evaluation-holdout-gate-and-crash-recovery--2026-11-01) |
 | Day 19b offline report generator and ZIP packaging | Committed | 11 unit tests, 15 API integration tests passed, zero skips; `c7241d3`; self-contained HTML/JSON/inline-SVG ZIP, HTML escaping, no raw rows/model binaries/external assets; see [validation evidence](docs/VALIDATION.md#day-19b-acceptance--escaped-offline-report-generator-and-zip-packaging--2026-11-01) |
+| Day 20 reproducibility and seed study | Verified locally (review-pending) | 15 integration tests, 14 unit tests passed, zero skips; repeated CV metric tolerance abs=1e-6/rel=1e-5 (actual max dev 0.0), timings excluded; 3-model-seed study (42/43/44) at provisional T=4 with zero holdout access; frozen Day 21 workloads/policy assertions prepared; see [validation evidence](docs/VALIDATION.md#day-20-acceptance--reproducibility-fixtures-tolerance-bounds-and-seed-study--2026-11-01) |
 | G3 — MLP and resource evidence | In progress | Day 17–19 verified; reproducibility, resource comparison and usability evidence pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical and MLP CV results are tracked locally; full-training refit, one-time holdout evaluation, crash fencing, and offline report packaging are committed and verified locally. **G1 and G2 have passed locally; G3–G4 remain pending.** Across Day 19 verification, the owning finalization suite passed 30 tests, the independent review passed 9 tests, the report generator unit suite passed 11 tests, and the API integration batch passed 26 tests.
+Classical and MLP CV results are tracked locally; full-training refit, one-time holdout evaluation, crash fencing, and offline report packaging are committed and verified locally. **G1 and G2 have passed locally; G3–G4 remain pending.** Across Day 20 verification, the reproducibility integration suite passed 15 tests, the benchmark unit suite passed 14 tests, and the three-model-seed study (42/43/44) completed at provisional T=4.
 
-The refit plan durably binds CV evidence and epoch budgets to the finalization record; one-time evaluation is protected by single-use tokens and crash locking. Offline reports are generated strictly from persisted results and loss curves, without accessing holdout data or triggering refit. Day 20 reproducibility and seed interpretation remain scheduled next.
+The refit plan durably binds CV evidence and epoch budgets to the finalization record; one-time evaluation is protected by single-use tokens and crash locking. Offline reports are generated strictly from persisted results and loss curves. Repeated CV achieves abs=1e-6/rel=1e-5 metric tolerance (0.0 actual deviation observed) with timings excluded. Day 21 full workload CPU profiling remains scheduled next.
 
 ### Local backend entrypoints
 

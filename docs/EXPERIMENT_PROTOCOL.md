@@ -100,3 +100,66 @@ The closed registry contains Dummy, LogisticRegression or Ridge, RandomForest, a
 The spawned worker accepts only an internally prepared `PreparedExperiment` and `RunConfig`, checks their experiment, configuration, split and run metadata against the queued immutable record, and passes only the training view and split metadata to the child. This is a trusted internal boundary, not an upload endpoint or an independent verification of manually constructed training contents. The context must originate from `prepare_experiment` / `training_from_manifest`; persisted raw dataset loading remains future work. A supervisor instance is supplied one prepared experiment and fails closed if it claims a different one. The suite runs serially, checks cancellation between folds and candidates, records separate fold fit and score times, and returns failed folds with safe codes and ineligible candidates. The supervisor discards cancelled or stale results.
 
 Results currently exist only in the supervisor's memory; a completed job means execution completed, not that candidates are durably published. Persistent candidate bundles, MLflow tracking, leaderboard comparisons, per-fold deadline enforcement and end-to-end dataset storage remain future work. No holdout evaluation or named-dataset performance claim follows from these synthetic fixtures.
+
+## Day 20 reproducibility and seed interpretation
+
+### Reproducibility and metric tolerance bounds (D20a)
+
+Complete repeated CV under an identical locked environment, threads, seeds, and configurations is evaluated against deterministic metric tolerance bounds:
+
+- **Metric tolerance:** Absolute deviation $\le 1\times 10^{-6}$ or relative deviation $\le 1\times 10^{-5}$ for all fold metrics, candidate summary means, summary standard deviations, and diagnostic prediction/residual points. Each value passes when `abs(a-b) <= 1e-6` or `abs(a-b)/max(abs(a),abs(b)) <= 1e-5` (relative deviation is zero when both are zero). Maxima are reported independently, not used as a combined pass criterion.
+- **Timing exclusion:** Fit wall seconds, score wall seconds, and total candidate seconds are strictly excluded from tolerance checks. CPU execution time naturally fluctuates with OS thread scheduling, frequency scaling, and background processes. Total timing is checked positive and finite; fold timings are checked nonnegative and finite.
+- **Identity equality:** Repeated runs require exact string equality for split manifest checksum (`split_sha256`), dataset configuration digest (`config_sha256`) bound to the split, full `RunConfig`, model family, model seed, task type, primary metric, optimization direction, and expected fold index sequence `(0, 1, 2, 3, 4)`.
+- **Complete fold coverage:** Every required fold must complete with valid status. Incomplete or failed folds invalidate the candidate. Validation row IDs per fold must match the frozen split manifest exactly.
+- **Actual observed deviation:** In the locked local execution environment (Windows x86_64, Python 3.12, PyTorch 2.14.1+cpu, scikit-learn 1.9.1), repeated CV across all ten supported model families (five binary classification, five regression) observed an actual maximum absolute deviation of **0.0** and maximum relative deviation of **0.0** (equal compared values; this does not establish bitwise identity of models). This actual measurement is recorded rather than promising cross-platform or cross-architecture bitwise identity, as differing CPU microarchitectures or BLAS implementations may introduce minor rounding divergence within the $1\times 10^{-6}$ / $1\times 10^{-5}$ tolerance.
+- **Holdout boundary:** Synthetic fixture creation, validation and split construction precede the training boundary and may inspect the synthetic dataset. Training-view construction indexes guarded rows and targets only for training IDs; CV receives a training-only view and split metadata, with no holdout values or path. The index guard checks direct indexing, not every possible tuple access method; this is not proof that all possible accesses are intercepted.
+
+Verification command:
+```powershell
+uv run pytest tests/integration/test_reproducibility.py -q
+```
+
+### Split seeds versus model seeds (D20b)
+
+ModelArena maintains a strict conceptual and operational separation between dataset split seeds and estimator model seeds:
+
+1. **Split seed (`split_seed`):**
+   - Controls dataset partitioning: the 20% holdout split, outer cross-validation folds, and inner early-stopping splits for MLP models.
+   - Frozen into the immutable `SplitManifest`.
+   - Fixed at `split_seed=42` across all candidate models and benchmark workloads for a dataset. Changing feature selection, positive label polarity, primary metric, or model seed never re-partitions data.
+2. **Model seed (`model_seed`):**
+   - Controls pseudo-random number generation internal to the estimators: random tree feature selection and sample bootstrapping (`RandomForest`), stochastic gradient descent batch ordering and weight initialization (`MLP`), and solver initialization (`LogisticRegression`).
+   - For MLP models, each fold derives a distinct deterministic seed via `derive_fold_seed(model_seed, family, fold_index)`.
+   - Varies across trials in seed studies to observe model variance on fixed data geometry, but never alters fold assignments or creates a fresh holdout partition.
+
+### Three-model-seed study (42/43/44 at provisional T=4)
+
+A fixed-fold sensitivity study evaluated one representative randomized classical estimator (`RandomForest`) and neural estimator (`MLP`) on small both-task fixtures (100 rows, 5 folds, `split_seed=42`) using provisional thread limit $T=4$:
+
+| Task | Family | Seed 42 Mean | Seed 43 Mean | Seed 44 Mean | Mean of Means | Std of Means | Spread (Max - Min) |
+|---|---|---|---|---|---|---|---|
+| Binary Classification | `random_forest` (F1) | 0.8387 | 0.8247 | 0.8398 | 0.8344 | 0.0069 | 0.0152 |
+| Binary Classification | `mlp` (F1) | 0.7926 | 0.8172 | 0.7990 | 0.8030 | 0.0104 | 0.0246 |
+| Regression | `random_forest` (RMSE) | 0.2960 | 0.2946 | 0.2893 | 0.2933 | 0.0029 | 0.0067 |
+| Regression | `mlp` (RMSE) | 0.6130 | 0.6949 | 0.6836 | 0.6638 | 0.0362 | 0.0819 |
+
+Observations:
+- On identical fold boundaries, varying the model seed produces measurable, bounded variation in primary metric performance (spread $\sim 0.015$–$0.025$ in classification F1, $\sim 0.007$–$0.082$ in regression RMSE).
+- In this fixture the random forest had a smaller spread than the MLP. Three seeds do not establish a general causal explanation or guarantee this ordering on other data.
+- The seed study receives a training-only view; see the holdout boundary above. This study measures sensitivity to changed model seeds and is not a deterministic replay.
+
+Execution command:
+```powershell
+uv run python -m scripts.benchmark --stage seeds
+```
+
+### Frozen Day 21 workloads and policy assertions
+
+The following workload descriptions and policy requirements prepare Day 21. They do not constitute executed trials or an implemented thread-comparison enforcement mechanism; Day 21 must verify the actual workload identities and enforce the fixed seed:
+
+1. **Workload BC-classical:** Bundled Breast Cancer training partition (455 training rows), 5-fold CV for `DummyClassifier`, `LogisticRegression`, `RandomForestClassifier`, and `HistGradientBoostingClassifier`.
+2. **Workload Housing-classical:** California Housing training partition, 5-fold CV for `DummyRegressor`, `Ridge`, `RandomForestRegressor`, and `HistGradientBoostingRegressor`.
+3. **Workload BC-small-MLP:** Outer fold 0 of Breast Cancer training partition with inner early-stopping split, default 64/32 architecture, batch size 32, Adam optimizer ($1\times 10^{-3}$ learning rate), maximum 100 epochs, patience 10.
+4. **Policy Assertion — Fixed Model Seed:** **All thread scaling trials across $T \in \{2, 4, 6\}$ MUST use fixed `model_seed=42`.** Varying model seeds across thread counts would confound execution runtime and CPU utilization with stochastic model trajectory shifts.
+5. **Policy Assertion — Deterministic Rerun Tolerance:** Repeated runs under identical thread counts and settings require metric tolerance $\le 1\times 10^{-6}$ absolute or $\le 1\times 10^{-5}$ relative, with execution timings excluded.
+6. **Execution boundary:** Day 21 profiling and Gate 3 decisions remain strictly unexecuted and review-pending.

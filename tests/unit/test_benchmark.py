@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 
 from ml.contracts import ResourceLimits
-from scripts.benchmark import ResourceRecorder, TrialConfig, normalized_cpu_percent, run_initial_probe
+from scripts.benchmark import (
+    ResourceRecorder,
+    TrialConfig,
+    normalized_cpu_percent,
+    run_initial_probe,
+    run_seed_study,
+)
 
 
 def test_cpu_normalization_uses_machine_capacity():
@@ -79,7 +85,43 @@ def test_initial_probe_uses_only_training_rows_and_no_holdout_metrics(tmp_path):
 
 
 def test_cli_rejects_unplanned_stage_and_invalid_thread_count():
-    for args in (["--stage", "full"], ["--threads", "8"]):
+    for args in (["--stage", "full"], ["--threads", "8"], ["--stage", "unknown"]):
         result = subprocess.run([sys.executable, "-m", "scripts.benchmark", *args],
                                 capture_output=True, text=True)
         assert result.returncode == 2
+
+
+def test_seed_study_produces_valid_report_and_preserves_holdout_isolation(tmp_path):
+    config = TrialConfig(limits=ResourceLimits(compute_threads=2, max_epochs=2))
+    report = run_seed_study(config, tmp_path)
+    assert report["stage"] == "seeds"
+    assert report["status"] == "completed"
+    assert report["configuration"]["split_seed"] == 42
+    assert report["configuration"]["model_seeds"] == [42, 43, 44]
+
+    # Verify both tasks and model families are present
+    results = report["study_results"]
+    assert "binary_classification" in results and "regression" in results
+    for task_key in ("binary_classification", "regression"):
+        assert "random_forest" in results[task_key] and "mlp" in results[task_key]
+        for family_key in ("random_forest", "mlp"):
+            fam_data = results[task_key][family_key]
+            assert set(fam_data["seeds"].keys()) == {"42", "43", "44"}
+            records = list(fam_data["seeds"].values())
+            assert len({r["split_sha256"] for r in records}) == 1
+            assert len({r["dataset_config_sha256"] for r in records}) == 1
+            assert all([f["fold_index"] for f in r["folds"]] == list(range(5)) for r in records)
+            assert len({tuple(f["validation_ids_sha256"] for f in r["folds"]) for r in records}) == 1
+            assert [r["run_config"]["model_seed"] for r in records] == [42, 43, 44]
+            assert all(r["run_config"]["split_seed"] == 42 for r in records)
+            assert fam_data["variation"]["mean_of_means"] is not None
+            assert fam_data["variation"]["std_of_means"] >= 0.0
+
+    # Verify frozen Day 21 preparation and policy assertions
+    prep = report["frozen_day_21_preparation"]
+    assert set(prep["workloads"].keys()) == {"BC-classical", "Housing-classical", "BC-small-MLP"}
+    assert prep["policy_assertions"]["thread_trials_model_seed"] == 42
+    assert prep["policy_assertions"]["day_21_execution_status"] == "unexecuted; frozen preparation only"
+
+    assert not list(tmp_path.iterdir())  # Scratch folder cleaned up
+    json.dumps(report, allow_nan=False)
