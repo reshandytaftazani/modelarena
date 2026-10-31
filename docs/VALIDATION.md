@@ -1,5 +1,54 @@
 # Validation evidence
 
+## Day 18 refit — module-level fixture verification, 2026-10-31
+
+Day 17 review was recorded as accepted; the subsequent remediation follow-up at
+the next section passed 522 unit/integration tests. Day 18 was separately
+authorized for refit, internal artifacts, tests and model cards only.
+
+- Windows 11 build 22621, Python 3.12.15, locked environment; 6.70 GiB available
+  at the initial check. No resource limits or dependencies were changed.
+- RED: `uv run --locked pytest tests/integration/test_refit.py -q` initially
+  failed all 7 tests because the refit module did not exist. An intermediate
+  run had 6 pass and one test-fixture construction failure; corrected the
+  fixture without changing the existing fold contract. Subsequent run after
+  stronger row, artifact and even-fold coverage: **8 passed**, 10.71 s. After
+  further provenance, unchanged real CV evidence and non-Dummy classical
+  coverage, the final owning command passed **12 tests**, zero skips, 12.27 s.
+- `uv run --locked pytest tests/integration/test_refit.py tests/integration/test_mlp_leakage.py tests/integration/test_mlp_cv.py tests/integration/test_cv_protocol.py tests/integration/test_holdout_gate.py tests/unit/test_mlp.py -q`:
+  **90 passed**, zero skips, two upstream deprecation warnings, 393.74 s. This
+  run began before the final refit-only provenance and tests were added; the
+  final owning command above covers those changes.
+- The fixture tests inspect both task types, preprocessing row IDs, every MLP
+  dataset index on every epoch, fresh instances, exact training matrix/targets,
+  no validation loader or restored best-training checkpoint, complete frozen
+  fold identities, even-fold rounding, and rejection of changed evidence and
+  changed training views. They also inspect checksummed manifest fields and
+  reject forged handles, altered model files and altered metadata. The row
+  fixture protects construction of its training view with a poison holdout;
+  it is not an OS sandbox or a test of a real holdout reader.
+- The new refit freezes a digest of complete candidate evidence and the epoch
+  budget in an in-process plan, validates it again before fitting, and writes
+  checksummed local artifacts without a deserializer. Training and holdout
+  finalization are not connected to a production job in this scope.
+- **Important handoff limitation:** the existing durable reservation does not
+  persist the refit plan, CV-evidence digest or epoch budget at reservation.
+  The in-process freeze is not proof of durable same-budget retries. Day 19 must
+  bind the plan to the checked published CV evidence and durable reservation,
+  enforce identical-budget retries, and validate the actual holdout boundary;
+  do not infer those guarantees from these tests. Process-issued artifact
+  verification handles also do not survive a restart; no reload is provided.
+  Failed writes can leave an unpublished staging directory for later cleanup;
+  crash reconciliation and final-result publication are not implemented here.
+- `uv run --locked pytest tests/integration/test_tracking.py tests/integration/test_baseline_cv.py tests/unit/test_preprocessing.py tests/unit/test_resource_estimates.py -q`:
+  **42 passed**, zero skips, one upstream deprecation warning, 137.10 s.
+- `uv lock --check`: passed (107 packages). `git diff --check`: passed with
+  an LF-to-CRLF warning. `graphify update .`: rebuilt the ignored code graph
+  (1,408 nodes, 4,664 edges, 77 communities); it warned that community labels
+  may need refreshing. The update is AST-only, not a semantic re-extraction of
+  documentation. No full post-Day-18 suite, benchmark, named-dataset demo,
+  real holdout read or finalization was run; G3 and G4 remain pending.
+
 ## Day 14–17 remediation follow-up — local suites passed, 2026-10-31
 
 With 7.73 GiB system memory available at the start, reran the review checks without changing resource limits. This supersedes the incomplete-verification status in the next section; its earlier results remain part of the audit trail.
