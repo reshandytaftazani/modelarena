@@ -1,5 +1,70 @@
 # Validation evidence
 
+## Day 19b acceptance — Escaped offline report generator and ZIP packaging — 2026-11-01
+
+**Status: ACCEPTED.** D19b is verified and checked in `docs/IMPLEMENTATION_PLAN.md`. The self-contained offline report generator service, ZIP verification harness, and HTTP download endpoint are verified with zero failures and zero skips under clean host conditions:
+
+1. **Verification Runs (2026-11-01):**
+   - Owning unit test suite: **11 passed**, 1 warning in 31.84s (`tests/unit/test_reports.py`).
+   - Owning + API integration batch: **26 passed**, 2 warnings in 59.04s (`tests/unit/test_reports.py`, `tests/integration/test_api.py`).
+   - Lock, diff, and graph integrity: `uv lock --check` passed in 1ms; `git diff --check` passed cleanly; `graphify update .` rebuilt 1,554 nodes, 5,403 edges, 79 communities.
+
+2. **Core In-Scope Safety & Integrity Guarantees Verified:**
+   - **Exclusive Derivation from Persisted Data:** Reports are generated solely from SQLite database metadata, candidate summaries, and staged/persisted loss curves. Zero raw dataset rows are included.
+   - **Model Binary Exclusion:** Zero model weights or serialized binaries (`.pkl`, `.joblib`, `.pt`, `.bin`, `.onnx`, etc.) are packaged into the report archive. Verified by exhaustive extension scanning and manifest audits.
+   - **External Asset Isolation:** Reports are completely self-contained. No external CDN scripts, stylesheets, Google fonts, analytics, or remote HTTP/HTTPS resources are referenced. SVGs are rendered purely inline.
+   - **Checksum & Schema Validation:** Both CV attempts and finalization result bundles undergo cryptographic hash verification and payload schema validation (`validate_final_result_payload`). Corrupted files or mismatched digests immediately fail report generation.
+   - **Distinct CV vs. Final Evaluation Labeling:** Unfinalized experiments prominently display `"CV only — holdout not evaluated"`. Finalized experiments clearly differentiate five-fold CV candidate selection from `"Final Evaluation (Holdout Partition — Evaluated Once)"`.
+   - **HTML Escaping for Malicious Input:** Malicious HTML, script injection, and special characters in dataset names, target columns, candidate identifiers, and error strings are strictly sanitized via HTML entity escaping (`html.escape`).
+   - **Zero Holdout Access or Refit Triggering:** Report generation never invokes refit procedures, issues holdout capabilities, or opens holdout partition files. Verified with poison monkeypatches (`PoisonHoldout`) and by physically removing the holdout partition file from disk before generating the report.
+   - **Path Traversal & Symlink Safety:** Symlinks and unsafe paths targeting report output locations are rejected with `ValueError("Unsafe output path")`.
+   - **API Delivery:** Added `GET /api/v1/experiments/{experiment_id}/report` returning `FileResponse(..., media_type="application/zip")` with `Content-Disposition` attachment headers and proper 404/409 error envelopes.
+
+3. **Captured Outputs:**
+
+**Owning Suite: `uv run --locked pytest tests/unit/test_reports.py -q`**
+```text
+...........                                                              [100%]
+============================== warnings summary ===============================
+tests/unit/test_reports.py::test_build_report_cv_only
+  C:\Users\Reshandy Taftazani A\Documents\Personal Project\ModelArena\.venv\Lib\site-packages\mlflow\store\tracking\sqlalchemy_store.py:327: SADeprecationWarning: The ``noload`` loader strategy is deprecated and will be removed in a future release.  This option produces incorrect results by returning ``None`` for related items. (deprecated since: 2.1)
+    sqlalchemy.orm.configure_mappers()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+11 passed, 1 warning in 31.84s
+```
+
+**Combined Owning + API Suite: `uv run --locked pytest tests/unit/test_reports.py tests/integration/test_api.py -q`**
+```text
+..........................                                               [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\Reshandy Taftazani A\Documents\Personal Project\ModelArena\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/unit/test_reports.py::test_build_report_cv_only
+  C:\Users\Reshandy Taftazani A\Documents\Personal Project\ModelArena\.venv\Lib\site-packages\mlflow\store\tracking\sqlalchemy_store.py:327: SADeprecationWarning: The ``noload`` loader strategy is deprecated and will be removed in a future release.  This option produces incorrect results by returning ``None`` for related items. (deprecated since: 2.1)
+    sqlalchemy.orm.configure_mappers()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+26 passed, 2 warnings in 59.04s
+```
+
+**`uv lock --check`**
+```text
+Resolved 107 packages in 1ms
+```
+
+**`git diff --check`**
+```text
+(exit 0)
+```
+
+**`graphify update .`**
+```text
+[graphify watch] Rebuilt: 1554 nodes, 5403 edges, 79 communities
+```
+
 ## Day 19a acceptance — Final evaluation, holdout gate, and crash recovery — 2026-11-01
 
 **Status: ACCEPTED.** D19a is verified and checked in `docs/IMPLEMENTATION_PLAN.md`. All required safety criteria, independent review fixes, and full serial regressions passed with zero failures and zero skips under clean host conditions:

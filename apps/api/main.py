@@ -24,6 +24,7 @@ from apps.api.services.datasets import MultipartUpload, UploadError, publish_upl
 from apps.api.services.workflow import configuration, configure, create_experiment
 from apps.api.services.retention import deletion_disclosure, request_deletion
 from apps.api.services.finalization import get_finalization_status, reserve, retry
+from apps.api.services.reports import build_report
 from apps.api.workers.presence import worker_status
 from apps.api.security import RequestContextMiddleware, error_response
 from ml.contracts import (DatasetConfig, DatasetProfile, FeatureColumn, FeatureSchema, FeatureType,
@@ -465,5 +466,16 @@ def create_app(repository: JobRepository, *, session_token: str,
             return _error(422, "invalid_request")
         job = await run_in_threadpool(retry, repository, experiment_id, body.idempotency_key)
         return await run_in_threadpool(_job, repository, job)
+
+    @app.get("/api/v1/experiments/{experiment_id}/report")
+    async def get_report_route(experiment_id: str):
+        from fastapi.responses import FileResponse
+        experiment_id = _opaque_id(experiment_id)
+        path = await run_in_threadpool(build_report, repository, experiment_id)
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=f"modelarena-report-{experiment_id}.zip",
+        )
 
     return app

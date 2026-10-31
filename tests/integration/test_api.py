@@ -269,3 +269,23 @@ def test_invalid_host_header_and_encoded_traversal_are_rejected(tmp_path):
             assert 'metadata.sqlite3' not in response.text
         duplicate_host = client.get('/health', headers=[('Host', 'localhost'), ('Host', 'evil.test')])
         assert duplicate_host.status_code == 400
+
+
+def test_get_experiment_report_endpoint(tmp_path):
+    from apps.api.services.reports import verify_report_zip
+    from tests.unit.test_reports import _create_cv_attempt
+    repo, prepared, run, _ = prepared_fixture(tmp_path, TaskType.BINARY_CLASSIFICATION)
+    _create_cv_attempt(repo, prepared, run, candidate_family="dummy")
+    app = create_app(repo, session_token=TOKEN)
+    with TestClient(app, base_url="http://localhost:8000", headers={"X-ModelArena-Token": TOKEN}) as client:
+        res_404 = client.get("/api/v1/experiments/00000000-0000-0000-0000-000000000000/report")
+        assert res_404.status_code == 404
+
+        res = client.get(f"/api/v1/experiments/{prepared.experiment_id}/report")
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "application/zip"
+        downloaded = tmp_path / "downloaded.zip"
+        downloaded.write_bytes(res.content)
+        verified = verify_report_zip(downloaded)
+        assert verified["manifest"]["status"] == "cv_only"
+        assert "CV only — holdout not evaluated" in verified["html"]
