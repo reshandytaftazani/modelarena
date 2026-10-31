@@ -17,6 +17,15 @@ def classical_families(task: TaskType) -> tuple[str, ...]:
     raise ValueError("Unsupported task")
 
 
+def model_families(task: TaskType) -> tuple[str, ...]:
+    """Unified registry of all supported families per task (classical and MLP)."""
+    if task == TaskType.BINARY_CLASSIFICATION and isinstance(task, TaskType):
+        return ("dummy", "logistic", "random_forest", "hist_gradient_boosting", "mlp")
+    if task == TaskType.REGRESSION and isinstance(task, TaskType):
+        return ("dummy", "ridge", "random_forest", "hist_gradient_boosting", "mlp")
+    raise ValueError("Unsupported task")
+
+
 def make_classical(task: TaskType, family: str, seed: int) -> BaseEstimator:
     if not isinstance(family, str) or family not in classical_families(task):
         raise ValueError("Unsupported task or classical family")

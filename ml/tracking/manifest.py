@@ -67,7 +67,7 @@ def make_manifest(job, context, run, dataset: dict, candidates: list, telemetry:
                       "algorithm": split.algorithm, "fold_reason": split.fold_reason, "folds": folds},
             "preprocessing": {"numeric": "median imputation with empty features retained, standard scaling",
                               "categorical": "constant imputation, one-hot encoding with unknown categories ignored",
-                              "fit_scope": "outer training fold only", "dense_output_guarded": True},
+                              "fit_scope": "classical: outer fit; MLP: inner fit only", "dense_output_guarded": True},
             "run_config": asdict(run),
             "candidates": candidates, "resource_telemetry": telemetry,
             "artifact_sha256": artifact_sha256, "mlflow_run_ids": run_ids,

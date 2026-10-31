@@ -1,5 +1,80 @@
 # Validation evidence
 
+## Day 17 independent review blocker resolved — ACCEPTED, 2026-10-31
+
+The independent review blocker on D17a and D17b has been resolved. D17 is now **ACCEPTED**.
+
+- **Supervisor-Enforced MLP Per-Fold Watchdog:**
+  - Implemented hard watchdog in `WorkerSupervisor._monitor` (`apps/api/workers/supervisor.py`). The supervisor tracks active fold start and finish events via `on_progress` (propagated with `fold_finished` boolean through `ml/training/classical_suite.py` and `apps/api/workers/execute.py`).
+  - Active fold deadline check: in every monitoring loop iteration, the supervisor evaluates `now - mlp_fold_started > self.limits.mlp_fold_seconds`. If exceeded, the supervisor marks `mlp_fold_deadline_exceeded = True`, clears any received result (`self.last_result = None`), and immediately returns `_Outcome("failed", "failed", "timeout")`.
+  - Termination of owned child: upon returning timeout, `_shutdown` invokes `monitor.terminate_owned_child` verifying `creation_time` identity before sending terminate, and escalates to `kill()` if unresponsive, guaranteeing verified process death before releasing the singleton slot.
+  - Fail-closed publication: an overdue fold or job never publishes an eligible candidate or partial results (`self.last_result = None`, `stage_attempt` skipped, DB record updated to `state="failed"`, `safe_error="timeout"`, and `candidates` status updated to `"failed"`).
+  - Robust handling of delayed, lost, or ambiguous progress messages: on receiving a completion result payload, `WorkerSupervisor` inspects candidate folds; any fold with `fit_seconds >= self.limits.mlp_fold_seconds` or unclosed fold exceeding deadline causes immediate rejection and timeout failure.
+
+- **RED/GREEN Verification Evidence:**
+  - **RED**: `test_supervisor_hard_watchdog_terminates_stuck_mlp_child` with test block `_MODELARENA_TEST_MLP_BLOCK_SECONDS=6.0` and `mlp_fold_seconds=1`: failed with `took 13.83s > 4.0s` without the supervisor watchdog (the supervisor did not interrupt the child during the stuck native fold).
+  - **GREEN**: With the supervisor watchdog enabled, `test_supervisor_hard_watchdog_terminates_stuck_mlp_child` passed with `mlp_duration = 0.82s` (interrupted promptly between 0.7s and 3.5s, child process terminated and dead `not psutil.pid_exists(child_pid)`, honest terminal state `final.state == "failed"`, `final.safe_error == "timeout"`, 0 published candidates, and worker slot cleanly recovered).
+  - `test_mlp_fold_deadline_versus_completion_race`: verified that an overdue result payload returning from a child is rejected fail-closed as timeout with 0 candidates published.
+  - `test_mlp_fold_deadline_versus_cancellation_race`: verified that user cancellation requested during an active fold stops the child and cleanly transitions to `cancelled` with slot recovered.
+
+- **Regression Suite Verification:**
+  - `uv run pytest tests/integration/test_mlp_cv.py -v`: **22 passed in 182.21 s** (includes all 19 previous tests + 3 new watchdog/race tests).
+  - `uv run pytest tests/integration/test_mlp_leakage.py -q`: **10 passed in 24.79 s**.
+  - `uv run pytest tests/integration/test_worker_lifecycle.py tests/integration/test_resource_monitoring.py tests/integration/test_worker_spawn.py -q`: **47 passed in 100.79 s**.
+  - `uv run pytest tests/integration/test_classical_suite.py tests/integration/test_tracking.py -q`: **14 passed in 308.43 s**.
+  - `git diff --check`: clean (0 errors).
+  - `uv lock --check`: clean (107 packages resolved).
+  - `graphify update .`: AST graph refreshed cleanly (rebuilt 1318 nodes, 4284 edges, 72 communities).
+
+- **Status and Handoff:**
+  - Status: D17a and D17b **ACCEPTED**.
+  - All review blockers resolved. Day 18 (final full-training refit and trusted artifacts) is authorized to begin. Day 18 has **not** been started in this turn.
+
+## Day 17 independent review — BLOCKED, 2026-10-31
+
+This review supersedes the Day 17 review-pending status below. D17a/D17b are **not accepted**: the required hard per-fold MLP time limit is not enforced by the supervising process. `WorkerSupervisor._monitor` enforces the overall `cv_job_seconds`, RSS and memory-pressure limits, but has no `mlp_fold_seconds` watchdog. A stuck native preprocessing/training call can therefore remain active beyond the frozen MLP fold deadline until the job limit or another supervisor limit is reached. The added cooperative deadline checks between operations/batches, and rejects an overdue returned fit; they cannot interrupt a blocked native call. A hard watchdog with verified owned-child termination and a regression using a genuinely blocked child is still needed before acceptance. This is also a pre-existing gap for classical per-fold deadlines; this review does not claim to fix those.
+
+Review fixes and evidence:
+
+- A real spawned worker previously returned only four classical families; it now runs the five-family registry for both tasks and publishes the MLP through the existing private bundle/MLflow path. Classical-only suite calls remain available. Progress reports include the MLP and all five families. The earlier test created a manual payload and did not establish worker integration.
+- `ResourceLimits(max_epochs=2)` previously trained 100 epochs and reported 100. The actual frozen limit now bounds training and is reported in both manifest and MLflow. A fold's complete curve must have one finite training and validation point per consecutive epoch; incomplete MLP metadata is ineligible. An outer-scoring failure retains a completed inner-fit curve but remains failed and unrankable. MLP fit time now includes preprocessing; BLAS is pinned to one during the torch training phase.
+- Strengthened tests check exact inner-fit/inner-validation loader arrays and frozen fit/transform row identities, holdout exclusion, positive label `a` mapped to 1, fold metrics recomputed from actual OOF outputs, both-task spawned jobs, exact per-fold results/manifest/MLflow curve values, reduced epoch caps, incomplete/undefined primary metrics and fail-closed publication when MLflow curve logging fails. The poison reader in the shared fixture guards materialization of the training view; it is not an OS-level proof against all possible holdout access. No holdout evaluation was run.
+- RED checks: the two spawned-worker tests could not find an MLP candidate and a lowered cap produced 100 epochs; a scoring-failure test lost the curve; an artificially overdue fit remained eligible. Each subsequently passed after the respective fixes. These are fixture checks, not default-workload or benchmark evidence.
+- Windows 11 build 22621, Python 3.12.15, existing locked environment: `uv run --locked pytest tests/integration/test_mlp_cv.py tests/integration/test_mlp_leakage.py tests/integration/test_tracking.py tests/integration/test_classical_suite.py tests/integration/test_api.py tests/integration/test_cv_protocol.py tests/integration/test_baseline_cv.py tests/unit/test_mlp.py -q` — **111 passed**, zero skips, 2 upstream deprecation warnings, 529.92 s. A prior combined run had one failure from the changed worker's final progress family; the expectation was updated to `mlp` and the successful rerun includes it.
+- `uv run --locked pytest -q` — **497 passed**, zero skips, 2 upstream deprecation warnings, 1251.75 s. After that run the artifact test was strengthened to compare exact per-fold values across all three stores; `uv run --locked pytest tests/integration/test_mlp_cv.py -q -k persistence_to_mlflow_and_manifest` — **1 passed, 18 deselected**, one upstream warning, 43.53 s. No application code changed after the full run.
+- `uv lock --check` passed. `graphify update .` refreshed the ignored AST graph; its community labels may need refresh. No dependencies, benchmark, external dataset, final refit, holdout evaluation, commit or push were introduced.
+
+**Handoff:** preserve the blocked status and do not start Day 18 until the hard MLP fold-time boundary is implemented and independently verified. G3/G4 and release remain pending.
+
+## Day 17 implementation (review-pending) — 2026-10-31
+
+The user authorized Day 17 implementation (`D17a` and `D17b`) and specified fixture tests only under the shared execution contract in `docs/IMPLEMENTATION_PLAN.md`. Day 17 implementation is complete and verified locally with zero regressions across the entire test suite. Per the contract, status is left review-pending for independent Terra inspection and review before Day 18.
+
+- **D17a Unified Model Registry and Both-Task MLP Outer Validation Scoring:**
+  - Added unified `model_families(task: TaskType) -> tuple[str, ...]` in `ml/models/classical.py` and exported from `ml/models/__init__.py`. Contains `("dummy", "logistic", "random_forest", "hist_gradient_boosting", "mlp")` for binary classification and `("dummy", "ridge", "random_forest", "hist_gradient_boosting", "mlp")` for regression. Retained `classical_families` for backwards compatibility with classical suites and supervisor workloads.
+  - Added strict validation in `evaluate_candidate` in `ml/training/cv.py`: verifies `config.family in model_families(task)` and requires `config.model_seed` to be an unsigned 32-bit integer.
+  - Implemented 5-fold CV for both tasks on frozen partitions: outer validation features are transformed using `FoldPreprocessor.transform(..., dtype=np.float32)` with guarded allocations and range checks; fed as CPU float32 tensors to the trained MLP.
+  - Correct sigmoid probabilities: binary classification predictions use `torch.sigmoid(...)` strictly in `[0.0, 1.0]` for `score_predictions` and `DiagnosticPoint` probabilities, with prediction threshold at `probability >= 0.5`. Regression uses raw model outputs and computes residuals `truth - prediction`.
+  - Zero holdout access: verified via row ID spies and `PoisonHoldout` that holdout row IDs are never accessed during preprocessing fit, inner training, or outer validation scoring. Outer validation rows are strictly excluded from preprocessing fit.
+  - Classical eligibility and failure policy matching: fold-level execution errors or non-finite losses mark the fold as `failed` with `metrics=None` and `error="fold_execution_failed"`. An incomplete fold or undefined primary metric sets `candidate.eligible = False` with `reason="incomplete_folds"` or `"undefined_in_one_or_more_folds"`, correctly routing the candidate to `unranked` in `compare_candidates`. Valid complete candidates rank cleanly with baseline deltas vs dummy.
+
+- **D17b Persistence of Loss Curves, Best Epochs, Timing, Caps, and Reduced Inner-Fit Counts:**
+  - Updated `FoldResult` in `ml/contracts.py` with validated fields: `best_epoch`, `epochs_trained`, `stop_reason`, `inner_fit_row_count`, and `loss_curve` (tuple of `EpochLoss`). Added strict bounds validation in `FoldResult.__post_init__` enforcing `1 <= best_epoch <= epochs_trained <= 100`, `inner_fit_row_count >= 2`, and `len(loss_curve) <= 100`.
+  - Updated `ml/training/cv.py` to extract `best_epoch`, `epochs_trained`, `stop_reason`, `inner_fit_row_count`, and `loss_curve` from `MLPFoldResult` and attach them to each completed `FoldResult`.
+  - Updated `stage_attempt` in `ml/tracking/publication.py`: handles `candidate["family"] == "mlp"` by recording MLP architecture and cap parameters (`max_epochs: 100`, `patience: 10`, `lr: 1e-3`, `batch_size: 32`, `hidden_dims: [64, 32]`) in `manifest["candidates"]`. Preserves fold summaries with `best_epoch`, `epochs_trained`, `stop_reason`, `inner_fit_row_count`, and finite loss curves. Converts all curve floats cleanly to ensure JSON compliance (`allow_nan=False`).
+  - Updated `track_attempt` in `ml/tracking/mlflow_store.py`: logs candidate-level cap parameters (`max_epochs`, `patience`, `batch_size`, `lr`, `hidden_dims`), fold-level metrics (`fit_seconds`, `score_seconds`, `best_epoch`, `epochs_trained`, `inner_fit_row_count`), fold param `stop_reason`, and per-epoch `train_loss` and `val_loss` at `step=epoch` using `client.log_metric`. Preserves fold boundaries in distinct MLflow fold runs without any cross-fold concoctions.
+
+- **Verification Evidence:**
+  - Day 17 acceptance tests: `uv run pytest tests/integration/test_mlp_cv.py -q`: **11 passed in 70.40 s**.
+  - Leakage regression tests: `uv run pytest tests/integration/test_mlp_leakage.py -q`: **10 passed in 13.03 s**.
+  - Tracking regression tests: `uv run pytest tests/integration/test_tracking.py -q`: **7 passed in 136.11 s**.
+  - Full unit and integration regression suite `uv run pytest -q`: **489 passed, 0 failures, 0 skips in 759.70 s (0:12:39)**.
+  - `uv lock --check` and `git diff --check` succeeded.
+
+- **Status and Handoff:**
+  - Status: **Review-pending** for independent Terra inspection under the Days 17–28 contract.
+  - Day 18 (final refit, frozen median epochs, trusted artifacts) has **not** been started.
+
 ## Day 16 core acceptance — 2026-10-31
 
 The user requested execution of Day 16 tasks from `IMPLEMENTATION_PLAN.md`, English output, and direct commit and push once all tests pass. Both Day 16 deliverables are complete and verified locally with zero regressions across the entire test suite.

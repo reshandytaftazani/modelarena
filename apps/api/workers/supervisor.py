@@ -347,6 +347,9 @@ class WorkerSupervisor:
         )
         stage = "starting"
         cancel_started = None
+        mlp_active_fold: int | None = None
+        mlp_fold_started: float | None = None
+        mlp_fold_deadline_exceeded = False
         while True:
             now = perf_counter()
             # Drain all pending child messages before deciding anything.
@@ -363,18 +366,50 @@ class WorkerSupervisor:
                         self.repository.record_progress(self.owner, job.job_id, reported)
                         stage = reported
                     if "family" in message:
+                        family = message.get("family")
+                        fold_index = message.get("fold_index")
+                        finished_units = message.get("finished_units")
+                        total_units = message.get("total_units")
                         try:
-                            self.repository.record_work_progress(self.owner, job.job_id, message.get("family"),
-                                                                 message.get("fold_index"), message.get("finished_units"),
-                                                                 message.get("total_units"))
+                            self.repository.record_work_progress(self.owner, job.job_id, family,
+                                                                 fold_index, finished_units,
+                                                                 total_units)
                         except ValueError:
                             logger.warning("Ignored invalid worker progress for job %s", job.job_id)
+
+                        if family == "mlp" and isinstance(fold_index, int):
+                            fold_finished = message.get("fold_finished")
+                            if fold_finished is False:
+                                if mlp_active_fold is not None and mlp_fold_started is not None:
+                                    if now - mlp_fold_started > self.limits.mlp_fold_seconds:
+                                        mlp_fold_deadline_exceeded = True
+                                mlp_active_fold = fold_index
+                                mlp_fold_started = now
+                            elif fold_finished is True:
+                                if mlp_active_fold == fold_index and mlp_fold_started is not None:
+                                    if now - mlp_fold_started > self.limits.mlp_fold_seconds:
+                                        mlp_fold_deadline_exceeded = True
+                                mlp_active_fold = None
+                                mlp_fold_started = None
+                            else:
+                                if mlp_active_fold is None or fold_index != mlp_active_fold:
+                                    mlp_active_fold = fold_index
+                                    mlp_fold_started = now
                 elif message.get("kind") == "result":
                     payload = message.get("payload")
                     if isinstance(payload, dict):
                         self.last_result = payload
                 elif message.get("kind") == "failure":
                     self._failure_seen = True
+
+            # Watchdog check for active MLP fold deadline
+            if mlp_active_fold is not None and mlp_fold_started is not None:
+                if now - mlp_fold_started > self.limits.mlp_fold_seconds:
+                    mlp_fold_deadline_exceeded = True
+
+            if mlp_fold_deadline_exceeded:
+                self.last_result = None
+                return _Outcome("failed", "failed", "timeout")
 
             # Cancel before considering a received result. The final database
             # transaction arbitrates requests that arrive after this check.
@@ -393,10 +428,29 @@ class WorkerSupervisor:
                 continue
 
             if self.last_result is not None:
+                if mlp_fold_deadline_exceeded:
+                    self.last_result = None
+                    return _Outcome("failed", "failed", "timeout")
+                if mlp_active_fold is not None and mlp_fold_started is not None:
+                    if now - mlp_fold_started > self.limits.mlp_fold_seconds:
+                        self.last_result = None
+                        return _Outcome("failed", "failed", "timeout")
+                if self.workload == "classical":
+                    candidates = self.last_result.get("candidates", [])
+                    for candidate in candidates:
+                        if candidate.get("family") == "mlp":
+                            for fold in candidate.get("folds", []):
+                                fit_sec = fold.get("fit_seconds", 0.0)
+                                if fit_sec >= self.limits.mlp_fold_seconds or fold.get("status") == "timeout":
+                                    self.last_result = None
+                                    return _Outcome("failed", "failed", "timeout")
                 process.join(TERMINATE_TIMEOUT_SECONDS)
                 return _Outcome("completed", "completed", None)
 
             if process.exitcode is not None:
+                if mlp_fold_deadline_exceeded:
+                    self.last_result = None
+                    return _Outcome("failed", "failed", "timeout")
                 code = "workload_failed" if self._failure_seen else "child_exited"
                 state = "failed" if self._failure_seen else "interrupted"
                 return _Outcome(state, state, code)

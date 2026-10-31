@@ -22,7 +22,7 @@ def test_real_local_tracking_and_durable_diagnostics(tmp_path):
     worker = worker_for(repo, prepared, run)
     assert worker.run_once().state == "completed"
     results = JobRepository(repo.path).read_published_results(job.job_id)
-    assert len(results["candidates"]) == 4
+    assert len(results["candidates"]) == 5
     assert results["candidates"][0]["diagnostics"]["partition"] == "out_of_fold_training"
     assert results["manifest"]["dataset"]["canonical_sha256"] == prepared.context.split.dataset_sha256
     assert results["manifest"]["split"]["manifest_sha256"] == prepared.context.split.manifest_sha256
@@ -33,9 +33,9 @@ def test_real_local_tracking_and_durable_diagnostics(tmp_path):
     experiments = client.search_experiments()
     runs = client.search_runs([e.experiment_id for e in experiments])
     own = [r for r in runs if r.data.tags.get("modelarena.attempt_id") == repo.get_job(job.job_id).attempt_id]
-    assert len(own) == 25  # parent + four candidates + five folds each
+    assert len(own) == 31  # parent + five candidates + five folds each
     assert all(r.info.status == "FINISHED" for r in own)
-    assert sum(r.data.tags.get("modelarena.kind") == "fold" for r in own) == 20
+    assert sum(r.data.tags.get("modelarena.kind") == "fold" for r in own) == 25
     assert all(r.data.tags.get("modelarena.job_id") == job.job_id for r in own)
     parent = next(r for r in own if r.data.tags["modelarena.kind"] == "attempt")
     assert {a.path for a in client.list_artifacts(parent.info.run_id)} == {"manifest.json", "results.json"}
@@ -86,7 +86,7 @@ def test_database_failure_rolls_back_candidates_and_identifies_orphans(tmp_path)
     experiment = client.get_experiment_by_name("modelarena-" + prepared.experiment_id)
     unfinished = client.create_run(experiment.experiment_id, tags={"modelarena.attempt_id": repo.get_job(job.job_id).attempt_id})
     report = reconcile_orphans(repo)
-    assert len(report["bundle_paths"]) == 1 and len(report["mlflow_run_ids"]) == 26
+    assert len(report["bundle_paths"]) == 1 and len(report["mlflow_run_ids"]) == 32
     assert reconcile_orphans(repo) == report
     assert all(client.get_run(run_id).data.tags["modelarena.orphaned"] == "true" for run_id in report["mlflow_run_ids"])
     assert client.get_run(unfinished.info.run_id).info.status == "KILLED"
@@ -107,7 +107,7 @@ def test_cancel_during_publication_wins_before_database_commit(tmp_path, monkeyp
     assert worker.last_result is None
     with pytest.raises(LookupError):
         repo.read_published_results(job.job_id)
-    assert len(reconcile_orphans(repo)["mlflow_run_ids"]) == 25
+    assert len(reconcile_orphans(repo)["mlflow_run_ids"]) == 31
 
 
 def test_missing_metrics_are_not_logged_as_nan(tmp_path):

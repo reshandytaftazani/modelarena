@@ -42,8 +42,8 @@ def test_cv_leaderboard_reads_only_published_results(tmp_path):
     assert result.job_id == job.job_id
     assert result.primary_metric == "rmse" and result.direction == "minimize"
     assert [entry.family for entry in result.ranked] == [entry["family"] for entry in bundle["comparison"]["ranked"]]
-    assert len(result.ranked) + len(result.unranked) == 4
-    assert len({entry.candidate_id for entry in (*result.ranked, *result.unranked)}) == 4
+    assert len(result.ranked) + len(result.unranked) == 5
+    assert len({entry.candidate_id for entry in (*result.ranked, *result.unranked)}) == 5
     assert all(entry.candidate_id and entry.mean is not None for entry in result.ranked)
     assert all(entry.mean is None for entry in result.unranked)
     app = create_app(PoisonRepository(repo.path), session_token="a" * 43)

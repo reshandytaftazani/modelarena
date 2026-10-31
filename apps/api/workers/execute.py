@@ -164,9 +164,10 @@ def child_main(
                 try:
                     candidates = evaluate_classical_suite(
                         context, run, cancelled=cancel_event.is_set if cancel_event is not None else lambda: False,
-                        on_progress=lambda family, fold, finished, total: _emit(
+                        include_mlp=True,
+                        on_progress=lambda family, fold, finished, total, fold_finished=False: _emit(
                             queue, PROGRESS, stage="fitting", family=family, fold_index=fold,
-                            finished_units=finished, total_units=total),
+                            finished_units=finished, total_units=total, fold_finished=fold_finished),
                     )
                 except SuiteCancelled:
                     return

@@ -33,6 +33,12 @@ def track_attempt(home: Path, job, candidates: list[dict]) -> tuple[dict, Mlflow
         ids["candidates"][family] = {"run_id": cid, "folds": {}}
         client.log_param(cid, "model_seed", candidate["model_seed"])
         client.log_param(cid, "primary_metric", candidate["primary_metric"])
+        if family == "mlp":
+            client.log_param(cid, "max_epochs", candidate["run_config"]["limits"]["max_epochs"])
+            client.log_param(cid, "patience", 10)
+            client.log_param(cid, "batch_size", 32)
+            client.log_param(cid, "lr", 1e-3)
+            client.log_param(cid, "hidden_dims", "64,32")
         for summary in candidate["summary"]:
             for key in ("mean", "std"):
                 value = summary[key]
@@ -44,6 +50,23 @@ def track_attempt(home: Path, job, candidates: list[dict]) -> tuple[dict, Mlflow
             client.log_param(fid, "status", fold["status"])
             client.log_metric(fid, "fit_seconds", fold["fit_seconds"])
             client.log_metric(fid, "score_seconds", fold["score_seconds"])
+            if fold.get("best_epoch") is not None:
+                client.log_metric(fid, "best_epoch", fold["best_epoch"])
+            if fold.get("epochs_trained") is not None:
+                client.log_metric(fid, "epochs_trained", fold["epochs_trained"])
+            if fold.get("inner_fit_row_count") is not None:
+                client.log_metric(fid, "inner_fit_row_count", fold["inner_fit_row_count"])
+            if fold.get("stop_reason") is not None:
+                client.log_param(fid, "stop_reason", fold["stop_reason"])
+            if fold.get("loss_curve"):
+                for point in fold["loss_curve"]:
+                    epoch = point["epoch"] if isinstance(point, dict) else point.epoch
+                    train_loss = point["train_loss"] if isinstance(point, dict) else point.train_loss
+                    val_loss = point["val_loss"] if isinstance(point, dict) else point.val_loss
+                    if train_loss is not None and math.isfinite(train_loss):
+                        client.log_metric(fid, "train_loss", train_loss, step=epoch)
+                    if val_loss is not None and math.isfinite(val_loss):
+                        client.log_metric(fid, "val_loss", val_loss, step=epoch)
             if fold["metrics"] is not None:
                 for metric in fold["metrics"]["metrics"]:
                     value = metric["value"]

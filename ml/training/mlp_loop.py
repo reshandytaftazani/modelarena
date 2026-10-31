@@ -8,8 +8,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from threadpoolctl import threadpool_limits
 
 from ml.contracts import (
+    EpochLoss,
     FoldManifest,
     ResourceLimits,
     RunConfig,
@@ -49,15 +51,6 @@ class RunControl:
     def check_cancelled(self) -> None:
         if self.is_cancelled():
             raise TrainingCancelled("MLP training cancelled by RunControl")
-
-
-@dataclass(frozen=True, slots=True)
-class EpochLoss:
-    """Loss record for one training epoch."""
-
-    epoch: int
-    train_loss: float
-    val_loss: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +321,25 @@ def train_mlp_fold(
     else:
         raise TypeError("training_or_context must be TrainingView or TrainingContext")
 
+    started = perf_counter()
+    deadline = started + config.limits.mlp_fold_seconds
+
+    def check_deadline() -> None:
+        if perf_counter() >= deadline:
+            raise TimeoutError("MLP fold deadline exceeded")
+
+    if isinstance(run_control, RunControl):
+        original_control = run_control
+    else:
+        original_control = RunControl(cancelled=run_control or (lambda: False))
+
+    def cancelled_or_timed_out() -> bool:
+        check_deadline()
+        return original_control.is_cancelled()
+
+    bounded_control = RunControl(cancelled=cancelled_or_timed_out,
+                                 on_epoch_end=original_control.on_epoch_end,
+                                 on_batch_end=original_control.on_batch_end)
     # --- Strict fold boundaries and leakage guards ---
     inner = manifest.inner
     inner_fit_set = set(inner.fit_row_ids)
@@ -362,6 +374,7 @@ def train_mlp_fold(
 
     x_inner_fit = preprocessor.fit_transform(inner_fit_view, dtype=np.float32)
     x_inner_val = preprocessor.transform(inner_val_view, dtype=np.float32)
+    check_deadline()
 
     y_inner_fit = np.asarray(inner_fit_view.targets, dtype=np.float32)
     y_inner_val = np.asarray(inner_val_view.targets, dtype=np.float32)
@@ -394,21 +407,22 @@ def train_mlp_fold(
 
     threads = compute_threads if compute_threads is not None else config.limits.compute_threads
 
-    started = perf_counter()
-    training_res = train_mlp(
-        model,
-        train_loader,
-        val_loader,
-        loss_fn=loss_fn,
-        optimizer=optimizer,
-        max_epochs=max_epochs,
-        patience=patience,
-        min_delta=min_delta,
-        compute_threads=threads,
-        run_control=run_control,
-        restore_best_weights=True,
-    )
+    with threadpool_limits(limits=1, user_api="blas"):
+        training_res = train_mlp(
+            model,
+            train_loader,
+            val_loader,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            max_epochs=min(max_epochs, config.limits.max_epochs),
+            patience=patience,
+            min_delta=min_delta,
+            compute_threads=threads,
+            run_control=bounded_control,
+            restore_best_weights=True,
+        )
     fit_seconds = perf_counter() - started
+    check_deadline()
 
     return MLPFoldResult(
         fold_index=manifest.fold_index,

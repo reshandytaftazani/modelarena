@@ -508,10 +508,12 @@ class JobRepository:
     def record_work_progress(self, owner: WorkerIdentity, job_id: str, family: str, fold_index: int,
                              finished_units: int, total_units: int) -> None:
         """Persist bounded fold work counts only for the current fenced owner."""
-        if family not in {"dummy", "logistic", "ridge", "random_forest", "hist_gradient_boosting"}:
+        if family not in {"dummy", "logistic", "ridge", "random_forest", "hist_gradient_boosting", "mlp"}:
             raise ValueError("Unsupported candidate family")
         if (type(fold_index) is not int or type(finished_units) is not int or type(total_units) is not int
-                or total_units not in (8, 12, 16, 20) or not 0 <= fold_index < total_units // 4
+                or total_units not in (8, 12, 16, 20, 10, 15, 25)
+                or not 0 <= fold_index < (5 if total_units == 20 else
+                                          total_units // 5 if total_units in (10, 15, 25) else total_units // 4)
                 or not 0 <= finished_units <= total_units):
             raise ValueError("Invalid progress units")
         with self._transaction() as db:

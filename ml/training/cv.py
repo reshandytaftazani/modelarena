@@ -7,6 +7,7 @@ in every fold.
 """
 
 from dataclasses import dataclass, replace
+import os
 from time import perf_counter
 from typing import Callable
 
@@ -20,9 +21,9 @@ from ml.contracts import (
 )
 from ml.data.splits import _config_digest, verify_manifest
 from ml.evaluation.metrics import metric_direction, oof_diagnostics, score_predictions
-from ml.models.classical import make_classical
+from ml.models.classical import make_classical, model_families
 from ml.preprocessing.factory import FoldPreprocessor
-from ml.training.mlp_loop import MLPFoldResult, derive_fold_seed, train_mlp_fold
+from ml.training.mlp_loop import MLPFoldResult, TrainingCancelled, derive_fold_seed, train_mlp_fold
 
 
 def _subset(view: TrainingView, ids: tuple[int, ...], positions: dict[int, int]) -> TrainingView:
@@ -139,6 +140,7 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                        cancelled: Callable[[], bool] = lambda: False,
                        on_fold: Callable[[int, bool], None] = lambda _index, _finished: None) -> CandidateResult:
     """Fit a fresh guarded preprocessor and estimator on each outer-fit set."""
+    from ml.training.classical_suite import SuiteCancelled
     started = perf_counter()
     if not isinstance(context, TrainingContext) or not isinstance(config, RunConfig):
         raise TypeError("TrainingContext and RunConfig required")
@@ -150,6 +152,10 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
     primary = config.primary_metric or ("f1" if task == TaskType.BINARY_CLASSIFICATION else "rmse")
     direction = metric_direction(task, primary)
     # Validate family/task/seed before beginning any fold work.
+    if config.family not in model_families(task):
+        raise ValueError(f"Unsupported task or model family: {config.family}")
+    if type(config.model_seed) is not int or not 0 <= config.model_seed < 2**32:
+        raise ValueError("Model seed must be an unsigned 32-bit integer")
     if config.family != "mlp":
         make_classical(task, config.family, config.model_seed)
     positions = {row_id: index for index, row_id in enumerate(view.row_ids)}
@@ -159,9 +165,7 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
             threadpool_limits(limits=1, user_api="openmp"):
         for frozen in split.folds:
             if cancelled():
-                # Lazy import avoids a module cycle; never translate cancellation
-                # into a failed fold or publish a partial candidate.
-                from ml.training.classical_suite import SuiteCancelled
+                # Never translate cancellation into a failed fold or publish a partial candidate.
                 raise SuiteCancelled()
             on_fold(frozen.fold_index, False)
             fit_seconds = score_seconds = 0.0
@@ -170,6 +174,10 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
             mlp_fold_res = None
             try:
                 if config.family == "mlp":
+                    test_block = os.environ.get("_MODELARENA_TEST_MLP_BLOCK_SECONDS")
+                    if test_block:
+                        import time
+                        time.sleep(float(test_block))
                     mlp_fold_res = train_mlp_fold(
                         view,
                         frozen,
@@ -178,6 +186,8 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                         holdout_row_ids=split.holdout_row_ids,
                     )
                     fit_seconds = mlp_fold_res.fit_seconds
+                    if fit_seconds >= config.limits.mlp_fold_seconds:
+                        raise TimeoutError("MLP fold deadline exceeded")
                     scoring = True
                     stage_started = perf_counter()
                     validation = _subset(view, frozen.validation_row_ids, positions)
@@ -187,12 +197,14 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                         raw_preds = mlp_fold_res.model(torch.from_numpy(encoded_validation)).squeeze(-1).numpy()
                     if raw_preds.ndim == 0:
                         raw_preds = np.expand_dims(raw_preds, 0)
+                    if not np.isfinite(raw_preds).all():
+                        raise ValueError("Model predictions must be finite")
                     if task == TaskType.BINARY_CLASSIFICATION:
-                        score = 1.0 / (1.0 + np.exp(-np.clip(raw_preds, -88.0, 88.0)))
+                        score = torch.sigmoid(torch.from_numpy(raw_preds)).numpy().astype(np.float64)
                         prediction = (score >= .5).astype(int)
                     else:
                         score = None
-                        prediction = raw_preds
+                        prediction = raw_preds.astype(np.float64)
                 else:
                     fit = _subset(view, frozen.fit_row_ids, positions)
                     validation = _subset(view, frozen.validation_row_ids, positions)
@@ -221,17 +233,41 @@ def evaluate_candidate(context: TrainingContext, config: RunConfig, *,
                 ) for index, (row_id, truth, predicted) in enumerate(
                     zip(validation.row_ids, validation.targets, prediction, strict=True)))
                 score_seconds = perf_counter() - stage_started
-                folds.append(FoldResult(frozen.fold_index, frozen.validation_row_ids, "completed",
-                                        metrics, fit_seconds, score_seconds))
+                best_epoch = mlp_fold_res.training_result.best_epoch if mlp_fold_res else None
+                epochs_trained = mlp_fold_res.training_result.epochs_trained if mlp_fold_res else None
+                stop_reason = mlp_fold_res.training_result.stop_reason if mlp_fold_res else None
+                inner_fit_count = len(mlp_fold_res.inner_fit_row_ids) if mlp_fold_res else None
+                loss_curve = mlp_fold_res.training_result.history if mlp_fold_res else None
+                folds.append(FoldResult(
+                    frozen.fold_index, frozen.validation_row_ids, "completed",
+                    metrics, fit_seconds, score_seconds,
+                    best_epoch=best_epoch,
+                    epochs_trained=epochs_trained,
+                    stop_reason=stop_reason,
+                    inner_fit_row_count=inner_fit_count,
+                    loss_curve=loss_curve,
+                ))
                 oof_points.extend(fold_points)
+            except (TrainingCancelled, SuiteCancelled):
+                raise SuiteCancelled() from None
+            except TimeoutError:
+                folds.append(FoldResult(frozen.fold_index, frozen.validation_row_ids, "timeout", None,
+                                        perf_counter() - stage_started, 0.0, "fold_timeout"))
             except (ValueError, RuntimeError, ArithmeticError):
                 elapsed = perf_counter() - stage_started
                 if scoring:
                     score_seconds = elapsed
                 else:
                     fit_seconds = elapsed
+                metadata = {}
+                if mlp_fold_res is not None and scoring:
+                    training = mlp_fold_res.training_result
+                    metadata = {"best_epoch": training.best_epoch, "epochs_trained": training.epochs_trained,
+                                "stop_reason": training.stop_reason,
+                                "inner_fit_row_count": len(mlp_fold_res.inner_fit_row_ids),
+                                "loss_curve": training.history}
                 folds.append(FoldResult(frozen.fold_index, frozen.validation_row_ids, "failed", None,
-                                        fit_seconds, score_seconds, "fold_execution_failed"))
+                                        fit_seconds, score_seconds, "fold_execution_failed", **metadata))
             finally:
                 # Do not retain previous fold matrices while allocating the next.
                 encoded_fit = encoded_validation = model = preprocessor = mlp_fold_res = None

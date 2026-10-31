@@ -436,6 +436,23 @@ class TrainingContext:
 
 
 @dataclass(frozen=True, slots=True)
+class EpochLoss:
+    """Loss record for one training epoch."""
+
+    epoch: int
+    train_loss: float
+    val_loss: float | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.epoch) is not int or self.epoch <= 0:
+            raise ValueError("epoch must be a positive integer")
+        if not math.isfinite(self.train_loss):
+            raise ValueError("train_loss must be finite")
+        if self.val_loss is not None and not math.isfinite(self.val_loss):
+            raise ValueError("val_loss must be finite or None")
+
+
+@dataclass(frozen=True, slots=True)
 class FoldResult:
     fold_index: int
     validation_row_ids: tuple[int, ...] = field(repr=False)
@@ -444,6 +461,45 @@ class FoldResult:
     fit_seconds: float
     score_seconds: float
     error: str | None = None
+    best_epoch: int | None = None
+    epochs_trained: int | None = None
+    stop_reason: str | None = None
+    inner_fit_row_count: int | None = None
+    loss_curve: tuple[EpochLoss, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.fold_index) is not int or self.fold_index < 0:
+            raise ValueError("Fold index must be a nonnegative integer")
+        if not isinstance(self.validation_row_ids, tuple) or not self.validation_row_ids:
+            raise ValueError("Validation row IDs must be a nonempty tuple")
+        if self.status not in ("completed", "failed", "timeout"):
+            raise ValueError(f"Invalid fold status: {self.status}")
+        if self.status == "completed" and self.metrics is None:
+            raise ValueError("Completed fold requires a MetricBundle")
+        if not math.isfinite(self.fit_seconds) or self.fit_seconds < 0:
+            raise ValueError("Fit seconds must be a nonnegative finite float")
+        if not math.isfinite(self.score_seconds) or self.score_seconds < 0:
+            raise ValueError("Score seconds must be a nonnegative finite float")
+        if self.best_epoch is not None:
+            if type(self.best_epoch) is not int or self.best_epoch <= 0 or self.best_epoch > 100:
+                raise ValueError("best_epoch must be between 1 and 100")
+        if self.epochs_trained is not None:
+            if type(self.epochs_trained) is not int or self.epochs_trained <= 0 or self.epochs_trained > 100:
+                raise ValueError("epochs_trained must be between 1 and 100")
+        if self.best_epoch is not None and self.epochs_trained is not None:
+            if self.best_epoch > self.epochs_trained:
+                raise ValueError("best_epoch cannot exceed epochs_trained")
+        if self.inner_fit_row_count is not None:
+            if type(self.inner_fit_row_count) is not int or self.inner_fit_row_count < 2:
+                raise ValueError("inner_fit_row_count must be at least 2")
+        if self.loss_curve is not None:
+            if not isinstance(self.loss_curve, tuple) or len(self.loss_curve) > 100:
+                raise ValueError("loss_curve must be a tuple of at most 100 points")
+            if (self.epochs_trained is None or self.best_epoch is None
+                    or len(self.loss_curve) != self.epochs_trained
+                    or any(not isinstance(item, EpochLoss) or item.epoch != index or item.val_loss is None
+                           for index, item in enumerate(self.loss_curve, 1))):
+                raise ValueError("loss_curve must contain one validated point per epoch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,6 +561,11 @@ class CandidateResult:
         if not self.complete:
             return False
         for fold in self.folds:
+            if self.family == "mlp" and (fold.loss_curve is None or fold.best_epoch is None
+                    or fold.epochs_trained is None or fold.inner_fit_row_count is None
+                    or fold.stop_reason not in ("max_epochs", "early_stopping_patience")
+                    or self.run_config is None or fold.epochs_trained > self.run_config.limits.max_epochs):
+                return False
             try:
                 value = fold.metrics.get(self.primary_metric).value
             except KeyError:

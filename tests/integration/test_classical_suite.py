@@ -13,11 +13,11 @@ from apps.api.services.jobs import prepare_experiment
 from apps.api.workers.supervisor import WorkerSupervisor
 from ml.contracts import DatasetConfig, FeatureColumn, FeatureSchema, FeatureType, ResourceLimits, RunConfig, TaskType
 from ml.data.csv_io import validate_csv
-from ml.models.classical import classical_families
+from ml.models.classical import classical_families, model_families
 from ml.training.classical_suite import SuiteCancelled, evaluate_classical_suite
 
 
-def prepared_fixture(tmp_path, task):
+def prepared_fixture(tmp_path, task, run=None):
     path = tmp_path / "input.csv"
     path.write_text("x,category,target\n" + "\n".join(
         f"{i},group-{i % 3},{'yes' if i % 2 else 'no'}" if task == TaskType.BINARY_CLASSIFICATION
@@ -26,7 +26,7 @@ def prepared_fixture(tmp_path, task):
         FeatureColumn("x", FeatureType.NUMERIC), FeatureColumn("category", FeatureType.CATEGORICAL),
     )), positive_label="yes" if task == TaskType.BINARY_CLASSIFICATION else None)
     repo = JobRepository(tmp_path / "metadata.sqlite3")
-    run = RunConfig()
+    run = run or RunConfig()
     prepared = prepare_experiment(repo, validate_csv(path, run.limits), config, run)
     job = repo.enqueue_cv(prepared.experiment_id, "suite")
     return repo, prepared, run, job
@@ -41,9 +41,9 @@ def test_spawned_worker_runs_four_families_on_frozen_training_folds(tmp_path, ta
     assert final.job_id == job.job_id and final.state == "completed"
     assert worker.last_child_pid != os.getpid() and worker.last_result["pid"] == worker.last_child_pid
     candidates = worker.last_result["candidates"]
-    assert tuple(c["family"] for c in candidates) == classical_families(task)
+    assert tuple(c["family"] for c in candidates) == model_families(task)
     comparison = worker.last_result["comparison"]
-    assert {entry["family"] for entry in comparison["ranked"]} == set(classical_families(task))
+    assert {entry["family"] for entry in comparison["ranked"]} == set(model_families(task))
     assert not comparison["unranked"]
     for candidate in candidates:
         assert candidate["eligible"] and candidate["split_sha256"] == prepared.context.split.manifest_sha256

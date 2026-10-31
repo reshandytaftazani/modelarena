@@ -115,7 +115,7 @@ def test_real_worker_entrypoint_completes_queued_experiment(tmp_path):
             assert process.returncode == 0, (stdout, stderr)
             assert seen_online
             assert client.get(f'/api/v1/jobs/{job_id}').json()['state'] == 'completed'
-            assert len(client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').json()['ranked']) == 4
+            assert len(client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').json()['ranked']) == 5
             assert client.get('/health').json()['worker'] == 'not_detected'
         finally:
             if process.poll() is None:

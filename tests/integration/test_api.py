@@ -187,12 +187,12 @@ def test_queued_upload_can_be_loaded_by_separate_worker_after_reopening_store(tm
         assert worker.run_once().state == 'completed'
         job_response = client.get(f'/api/v1/jobs/{job_id}').json()
         assert job_response['state'] == 'completed'
-        assert job_response['progress']['finished_units'] == 20
-        assert job_response['progress']['total_units'] == 20
-        assert job_response['progress']['family'] == 'hist_gradient_boosting'
+        assert job_response['progress']['finished_units'] == 25
+        assert job_response['progress']['total_units'] == 25
+        assert job_response['progress']['family'] == 'mlp'
         assert job_response['progress']['fold_index'] == 4
         ranking = client.get(f'/api/v1/experiments/{experiment_id}/leaderboard').json()
-        assert ranking['job_id'] == job_id and len(ranking['ranked']) == 4
+        assert ranking['job_id'] == job_id and len(ranking['ranked']) == 5
         candidate = client.get(f"/api/v1/candidates/{ranking['ranked'][0]['candidate_id']}")
         assert candidate.status_code == 200
         assert candidate.json()['diagnostics']['partition'] == 'out_of_fold_training'
