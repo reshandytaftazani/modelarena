@@ -22,6 +22,7 @@ from apps.api.services.finalization import (
     start_evaluation,
 )
 from ml.contracts import FrozenSelection, HoldoutCapability, TaskType
+from tests.integration.test_review_finalization_regressions import claim_finalization
 
 
 TOKEN = "a" * 43
@@ -309,7 +310,10 @@ def test_durable_evaluation_start_issues_capability_and_makes_retry_impossible(t
             HoldoutCapability(scope_id=scope_id, holdout_path="path/to/holdout.csv", _auth_token="")
 
         # Start evaluation durably
-        capability = start_evaluation(repo, finalization_id, expected_digest=digest)
+        job = repo.get_job(res.json()["job_id"])
+        owner, claimed = claim_finalization(repo, job)
+        capability = start_evaluation(repo, finalization_id, expected_digest=digest,
+                                      owner=owner, job_id=job.job_id, attempt_id=claimed.attempt_id)
         assert isinstance(capability, HoldoutCapability)
         assert capability.scope_id == scope_id
 
@@ -356,7 +360,10 @@ def test_fixture_evaluator_and_poison_holdout_isolation(tmp_path):
         )
         finalization_id = res.json()["finalization_id"]
 
-        capability = start_evaluation(repo, finalization_id, expected_digest=digest)
+        job = repo.get_job(res.json()["job_id"])
+        owner, claimed = claim_finalization(repo, job)
+        capability = start_evaluation(repo, finalization_id, expected_digest=digest,
+                                      owner=owner, job_id=job.job_id, attempt_id=claimed.attempt_id)
 
         # Fixture evaluation succeeds with valid capability
         final_result = fixture_evaluate_holdout(repo, capability)

@@ -595,7 +595,7 @@ def test_supervisor_hard_watchdog_terminates_stuck_mlp_child(tmp_path, monkeypat
 
 def test_mlp_fold_deadline_versus_completion_race(tmp_path):
     """An overdue fold payload arriving at completion must not claim success."""
-    import multiprocessing
+    from queue import Queue
     run = RunConfig(limits=ResourceLimits(compute_threads=2, max_epochs=2, mlp_fold_seconds=1, cv_job_seconds=30))
     repo, prepared, _, job = prepared_fixture(tmp_path, TaskType.REGRESSION, run)
     worker = WorkerSupervisor(
@@ -617,8 +617,10 @@ def test_mlp_fold_deadline_versus_completion_race(tmp_path):
             }],
         }],
     }
-    ctx = multiprocessing.get_context("spawn")
-    q = ctx.Queue()
+    # The process below is a synchronous test double. A multiprocessing.Queue
+    # has an asynchronous feeder, so its messages may still be in transit when
+    # the already-exited double is inspected; use a synchronous queue instead.
+    q = Queue()
     q.put({"kind": "progress", "stage": "fitting", "family": "mlp", "fold_index": 0,
            "finished_units": 20, "total_units": 25, "fold_finished": False})
     q.put({"kind": "progress", "stage": "fitting", "family": "mlp", "fold_index": 0,
@@ -681,4 +683,3 @@ def test_mlp_fold_deadline_versus_cancellation_race(tmp_path, monkeypatch):
     # Verify slot is recovered
     recovered = repo.claim_next(WorkerIdentity("supervisor-cancel-recovery", repo.lease_generation()))
     assert repo.get_job(job.job_id).state == "cancelled"
-

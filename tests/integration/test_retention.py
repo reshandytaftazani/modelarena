@@ -115,7 +115,7 @@ def test_schema_v2_migrates_with_existing_datasets(tmp_path):
         db.execute('PRAGMA user_version=2')
     migrated = JobRepository(repo.path)
     with migrated._connection() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 6
         assert db.execute("SELECT name FROM sqlite_master WHERE name='deletion_intents'").fetchone()
 
 
@@ -131,7 +131,7 @@ def test_schema_v3_migrates_without_losing_existing_dataset(tmp_path):
         db.execute('PRAGMA user_version=3')
     migrated = JobRepository(repo.path)
     with migrated._connection() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 6
         assert db.execute('SELECT 1 FROM datasets WHERE dataset_id=?', (dataset_id,)).fetchone()
         assert db.execute("SELECT count(*) FROM sqlite_master WHERE name IN ('worker_presence','scope_lock_markers','scope_tombstones')").fetchone()[0] == 3
 

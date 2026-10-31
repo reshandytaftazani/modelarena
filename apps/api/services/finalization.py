@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from apps.api.database.repository import ConflictError, JobRecord, JobRepository, NotFoundError, _now
+from apps.api.database.repository import ConflictError, JobRecord, JobRepository, NotFoundError, WorkerIdentity, _now
 from apps.api.services.retention import find_tombstone
 from ml.contracts import FinalResult, FrozenSelection, HoldoutCapability, MetricBundle, MetricValue, TaskType
 from ml.tracking.manifest import canonical_bytes, digest_bytes
@@ -76,7 +76,7 @@ def reserve(
     if tombstone == "consumed":
         raise ConflictError("Holdout evaluation scope has already been consumed")
 
-    selection = repository.reserve_finalization(scope_id, candidate_id, expected_digest)
+    selection = repository.reserve_finalization(scope_id, candidate_id, expected_digest, experiment_id=experiment_id)
     key = idempotency_key or f"finalization-{selection.finalization_id}"
     job = repository.enqueue_finalization(selection.finalization_id, key)
     return selection, job
@@ -146,15 +146,18 @@ def retry(repository: JobRepository, experiment_id: str, idempotency_key: str) -
     return repository.retry_pre_evaluation(row["finalization_id"], idempotency_key)
 
 
-def start_evaluation(repository: JobRepository, finalization_id: str, expected_digest: str) -> HoldoutCapability:
+def start_evaluation(repository: JobRepository, finalization_id: str, expected_digest: str, *,
+                     owner: WorkerIdentity | None = None, job_id: str = "", attempt_id: str = "") -> HoldoutCapability:
     """Commit durable evaluation-start and issue the single-use HoldoutCapability."""
-    scope_id, token = repository.start_evaluation(finalization_id, expected_digest)
-    holdout_path = repository.path.parent / "datasets" / scope_id / "holdout.csv"
-    return HoldoutCapability(scope_id=scope_id, holdout_path=str(holdout_path), _auth_token=token)
+    scope_id, token = repository.start_evaluation(finalization_id, expected_digest,
+                                                   owner=owner, job_id=job_id, attempt_id=attempt_id)
+    return HoldoutCapability._issue(finalization_id=finalization_id, scope_id=scope_id,
+                                    candidate_digest=expected_digest, job_id=job_id, attempt_id=attempt_id,
+                                    owner_token=owner.owner_token, owner_generation=owner.generation, _auth_token=token)
 
 
-def issue_holdout_capability(repository: JobRepository, finalization_id: str, expected_digest: str) -> HoldoutCapability:
-    return start_evaluation(repository, finalization_id, expected_digest)
+def issue_holdout_capability(repository: JobRepository, finalization_id: str, expected_digest: str, **identity) -> HoldoutCapability:
+    return start_evaluation(repository, finalization_id, expected_digest, **identity)
 
 
 def fixture_evaluate_holdout(repository: JobRepository, capability: HoldoutCapability) -> FinalResult:
@@ -162,9 +165,7 @@ def fixture_evaluate_holdout(repository: JobRepository, capability: HoldoutCapab
     if not isinstance(capability, HoldoutCapability):
         raise TypeError("Valid HoldoutCapability required")
 
-    fin = repository.get_finalization(capability.scope_id)
-    if fin is None or fin["state"] != "evaluating" or fin["evaluation_started_at"] is None:
-        raise ConflictError("Holdout evaluation must be started durably before evaluation")
+    fin = repository.consume_fixture_authorization(capability)
 
     now = _now()
     bundle = MetricBundle(TaskType.REGRESSION, 100, (MetricValue("rmse", 0.85),))
@@ -178,5 +179,4 @@ def fixture_evaluate_holdout(repository: JobRepository, capability: HoldoutCapab
         evaluation_seconds=0.05,
         evaluated_at=now,
     )
-    repository.record_evaluation_result(fin["finalization_id"], state="evaluated")
     return final_result

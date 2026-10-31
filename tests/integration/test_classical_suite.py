@@ -41,6 +41,8 @@ def test_spawned_worker_runs_four_families_on_frozen_training_folds(tmp_path, ta
     assert final.job_id == job.job_id and final.state == "completed"
     assert worker.last_child_pid != os.getpid() and worker.last_result["pid"] == worker.last_child_pid
     candidates = worker.last_result["candidates"]
+    # Observed in the actual CV child at the MLP boundary, not the pool probe.
+    assert worker.last_result["mlp_interop_threads"] == 1
     assert tuple(c["family"] for c in candidates) == model_families(task)
     comparison = worker.last_result["comparison"]
     assert {entry["family"] for entry in comparison["ranked"]} == set(model_families(task))

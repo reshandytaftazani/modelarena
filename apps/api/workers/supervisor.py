@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import logging
 import multiprocessing
 import os
+import secrets
 from queue import Empty
 from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any, Mapping
@@ -116,6 +117,7 @@ class WorkerSupervisor:
         self.last_resources: dict[str, Any] | None = None
         self._failure_seen = False
         self._child_created: float | None = None
+        self._fold_pipe = None
 
     # -- public API ---------------------------------------------------------
     def run_once(self) -> JobRecord | None:
@@ -248,6 +250,8 @@ class WorkerSupervisor:
     def _spawn_and_wait(self, job: JobRecord, attempt_id: str) -> _Outcome:
         context = multiprocessing.get_context("spawn")
         messages = context.Queue()
+        parent_fold, child_fold = context.Pipe() if self.workload == "classical" else (None, None)
+        self._fold_pipe = parent_fold
         self._cancel_event = context.Event()
         start_event = context.Event()
         process = context.Process(
@@ -258,7 +262,7 @@ class WorkerSupervisor:
             target=execute.child_main,
             args=(job.job_id, attempt_id, self._child_limits(), self.workload,
                   dict(self.options), messages, self._cancel_event, start_event),
-            kwargs=({"classical_input": (self.classical_input[0].context, self.classical_input[1])}
+            kwargs=({"classical_input": (self.classical_input[0].context, self.classical_input[1]), "fold_channel": child_fold}
                     if self.classical_input is not None else {}),
             name=f"modelarena-exec-{job.job_id[:8]}",
             daemon=False,
@@ -266,6 +270,8 @@ class WorkerSupervisor:
         sampler: monitor.ChildSampler | None = None
         try:
             process.start()
+            if child_fold is not None:
+                child_fold.close()
             self.last_child_pid = process.pid
             self._child_created = monitor.process_creation_time(process.pid)
             self.repository.record_child(self.owner, job.job_id, attempt_id,
@@ -290,6 +296,9 @@ class WorkerSupervisor:
             raise
         finally:
             self._shutdown(process, messages, sampler)
+            if parent_fold is not None:
+                parent_fold.close()
+            self._fold_pipe = None
         return outcome
 
     def _shutdown(self, process, messages, sampler) -> None:
@@ -350,8 +359,48 @@ class WorkerSupervisor:
         mlp_active_fold: int | None = None
         mlp_fold_started: float | None = None
         mlp_fold_deadline_exceeded = False
+        mlp_completed = 0
+        fold_proof = None
+        fold_closed = False
         while True:
             now = perf_counter()
+            # This is a control channel, not best-effort progress. The child
+            # blocks at each boundary until the supervisor acknowledges it.
+            if self._fold_pipe is not None and not fold_closed:
+                try:
+                    while self._fold_pipe.poll():
+                        fold, finished, proof = self._fold_pipe.recv()
+                        now = perf_counter()
+                        if type(fold) is not int or type(finished) is not bool:
+                            return _Outcome("failed", "failed", "timeout")
+                        if not finished:
+                            if mlp_active_fold is not None or fold != mlp_completed or proof is not None:
+                                return _Outcome("failed", "failed", "timeout")
+                            mlp_active_fold, mlp_fold_started = fold, now
+                            fold_proof = secrets.token_hex(16)
+                        else:
+                            if (mlp_active_fold != fold or mlp_fold_started is None
+                                    or proof != fold_proof or now - mlp_fold_started >= self.limits.mlp_fold_seconds):
+                                return _Outcome("failed", "failed", "timeout")
+                            mlp_active_fold, mlp_fold_started = None, None
+                            mlp_completed += 1
+                        self._fold_pipe.send((fold, finished, fold_proof))
+                        if finished:
+                            fold_proof = None
+                except EOFError:
+                    fold_closed = True
+                    if mlp_active_fold is not None or mlp_completed != self.classical_input[0].context.split.fold_count:
+                        self.last_result = None
+                        if (self.repository.cancel_requested(job.job_id) and
+                                (mlp_fold_started is None or perf_counter() - mlp_fold_started < self.limits.mlp_fold_seconds)):
+                            return _Outcome("cancelled", "cancelled", "cancelled")
+                        return _Outcome("failed", "failed", "timeout")
+                except (OSError, TypeError, ValueError):
+                    self.last_result = None
+                    if (self.repository.cancel_requested(job.job_id) and
+                            (mlp_fold_started is None or perf_counter() - mlp_fold_started < self.limits.mlp_fold_seconds)):
+                        return _Outcome("cancelled", "cancelled", "cancelled")
+                    return _Outcome("failed", "failed", "timeout")
             # Drain all pending child messages before deciding anything.
             while True:
                 try:
@@ -377,24 +426,6 @@ class WorkerSupervisor:
                         except ValueError:
                             logger.warning("Ignored invalid worker progress for job %s", job.job_id)
 
-                        if family == "mlp" and isinstance(fold_index, int):
-                            fold_finished = message.get("fold_finished")
-                            if fold_finished is False:
-                                if mlp_active_fold is not None and mlp_fold_started is not None:
-                                    if now - mlp_fold_started > self.limits.mlp_fold_seconds:
-                                        mlp_fold_deadline_exceeded = True
-                                mlp_active_fold = fold_index
-                                mlp_fold_started = now
-                            elif fold_finished is True:
-                                if mlp_active_fold == fold_index and mlp_fold_started is not None:
-                                    if now - mlp_fold_started > self.limits.mlp_fold_seconds:
-                                        mlp_fold_deadline_exceeded = True
-                                mlp_active_fold = None
-                                mlp_fold_started = None
-                            else:
-                                if mlp_active_fold is None or fold_index != mlp_active_fold:
-                                    mlp_active_fold = fold_index
-                                    mlp_fold_started = now
                 elif message.get("kind") == "result":
                     payload = message.get("payload")
                     if isinstance(payload, dict):
@@ -403,8 +434,9 @@ class WorkerSupervisor:
                     self._failure_seen = True
 
             # Watchdog check for active MLP fold deadline
+            now = perf_counter()
             if mlp_active_fold is not None and mlp_fold_started is not None:
-                if now - mlp_fold_started > self.limits.mlp_fold_seconds:
+                if now - mlp_fold_started >= self.limits.mlp_fold_seconds:
                     mlp_fold_deadline_exceeded = True
 
             if mlp_fold_deadline_exceeded:
@@ -436,6 +468,10 @@ class WorkerSupervisor:
                         self.last_result = None
                         return _Outcome("failed", "failed", "timeout")
                 if self.workload == "classical":
+                    if (self._fold_pipe is None or mlp_active_fold is not None or
+                            mlp_completed != self.classical_input[0].context.split.fold_count):
+                        self.last_result = None
+                        return _Outcome("failed", "failed", "timeout")
                     candidates = self.last_result.get("candidates", [])
                     for candidate in candidates:
                         if candidate.get("family") == "mlp":

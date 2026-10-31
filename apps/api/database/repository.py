@@ -18,7 +18,7 @@ from typing import Iterator
 from uuid import uuid4
 
 import secrets
-from apps.api.database.schema import (DELETION_INTENTS_SQL, FINALIZATIONS_SQL, JOB_PROGRESS_SQL, SCHEMA_SQL, SCHEMA_VERSION,
+from apps.api.database.schema import (DELETION_INTENTS_SQL, EVALUATION_AUTH_SQL, FINALIZATIONS_SQL, JOB_PROGRESS_SQL, SCHEMA_SQL, SCHEMA_VERSION,
                                       SCOPE_LOCK_MARKERS_SQL, SCOPE_TOMBSTONES_SQL,
                                       WORKER_PRESENCE_SQL, WORKER_PROCESSES_SQL)
 from apps.api.workers.monitor import process_liveness
@@ -187,7 +187,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -203,6 +203,10 @@ class JobRepository:
                         if sqlite3.complete_statement(statement):
                             db.execute(statement)
                             statement = ""
+                    db.execute(EVALUATION_AUTH_SQL)
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 5:
+                    db.execute(EVALUATION_AUTH_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version in (1, 2, 3, 4):
                     if version < 2:
@@ -247,6 +251,7 @@ class JobRepository:
                     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_running_job ON jobs((1)) WHERE state='running'")
                     db.execute("CREATE INDEX IF NOT EXISTS queued_jobs ON jobs(state, sequence)")
                     db.execute("PRAGMA foreign_keys=ON")
+                    db.execute(EVALUATION_AUTH_SQL)
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise ValueError("Unsupported metadata schema version")
@@ -479,6 +484,10 @@ class JobRepository:
             now = _now()
             db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
                        "WHERE job_id=?", (now, row["job_id"]))
+            db.execute("UPDATE finalizations SET state='retryable_pre_evaluation',updated_at=? "
+                       "WHERE refit_job_id=? AND evaluation_started_at IS NULL AND state='refitting'", (now, row["job_id"]))
+            db.execute("UPDATE finalizations SET state='locked_failed',updated_at=? "
+                       "WHERE refit_job_id=? AND evaluation_started_at IS NOT NULL AND state='evaluating'", (now, row["job_id"]))
             db.execute("UPDATE candidates SET status='interrupted' WHERE attempt_id=?", (row["attempt_id"],))
             db.execute("UPDATE worker_lease SET generation=generation+1,owner_token=NULL,active_job_id=NULL,heartbeat_at=?",
                        (now,))
@@ -588,6 +597,10 @@ class JobRepository:
                           WHERE job_id=?""", (state, stage, safe_error, now, now, job_id))
             if state != "completed":
                 db.execute("UPDATE candidates SET status=? WHERE attempt_id=?", (state, attempt_id))
+                db.execute("UPDATE finalizations SET state='retryable_pre_evaluation',updated_at=? "
+                           "WHERE refit_job_id=? AND evaluation_started_at IS NULL AND state='refitting'", (now, job_id))
+                db.execute("UPDATE finalizations SET state='locked_failed',updated_at=? "
+                           "WHERE refit_job_id=? AND evaluation_started_at IS NOT NULL AND state='evaluating'", (now, job_id))
             db.execute("UPDATE worker_lease SET owner_token=NULL,active_job_id=NULL,heartbeat_at=? "
                        "WHERE singleton=1 AND owner_token=?", (now, owner.owner_token))
             _audit(db, "worker", job_id, f"job_{state}")
@@ -621,17 +634,27 @@ class JobRepository:
             state = "cancelled" if row["state"] == "queued" else "running"
             db.execute("UPDATE jobs SET cancel_requested=1,state=?,stage=?,updated_at=? WHERE job_id=? AND state=?",
                        (state, "cancelled" if state == "cancelled" else row["stage"], _now(), job_id, row["state"]))
+            if state == "cancelled":
+                db.execute("UPDATE finalizations SET state='retryable_pre_evaluation',updated_at=? "
+                           "WHERE refit_job_id=? AND evaluation_started_at IS NULL AND state='refitting'", (_now(), job_id))
             _audit(db, "service", job_id, "job_cancel_requested")
             result = _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
         logger.info("Cancellation requested: %s", result.job_id)
         return result
 
-    def reserve_finalization(self, scope_id: str, candidate_id: str, digest: str) -> FrozenSelection:
+    def reserve_finalization(self, scope_id: str, candidate_id: str, digest: str, *, experiment_id: str) -> FrozenSelection:
         import math
         _text(scope_id)
         _text(candidate_id)
         _text(digest)
+        _text(experiment_id)
         with self._transaction() as db:
+            belongs = db.execute("SELECT 1 FROM candidates c JOIN experiments e ON e.experiment_id=c.experiment_id "
+                                 "JOIN configurations cfg ON cfg.configuration_id=e.configuration_id "
+                                 "WHERE c.candidate_id=? AND e.experiment_id=? AND cfg.scope_id=?",
+                                 (candidate_id, experiment_id, scope_id)).fetchone()
+            if not belongs:
+                raise ConflictError("Candidate does not belong to the requested experiment and scope")
             scope = db.execute(
                 "SELECT scope_id, canonical_sha256, target, task FROM evaluation_scopes WHERE scope_id=?",
                 (scope_id,),
@@ -793,23 +816,29 @@ class JobRepository:
             if fin["evaluation_started_at"] is not None or fin["state"] in ("evaluating", "evaluated", "locked_failed"):
                 raise ConflictError("Evaluation has already started or completed; holdout cannot be re-evaluated")
 
-            if fin["refit_job_id"]:
-                prev_job = db.execute("SELECT * FROM jobs WHERE job_id=?", (fin["refit_job_id"],)).fetchone()
-                if prev_job and prev_job["attempt_id"]:
-                    proc = db.execute("SELECT child_pid, child_created FROM worker_processes WHERE attempt_id=?",
-                                      (prev_job["attempt_id"],)).fetchone()
-                    if proc and proc["child_pid"]:
-                        if process_liveness(proc["child_pid"], proc["child_created"]) != "dead":
-                            raise ConflictError("Previous worker child must be verified dead before retry")
-                if prev_job and prev_job["state"] == "running":
-                    raise ConflictError("Previous worker child must be verified dead before retry")
-
             payload = _digest(_json(["finalization", fin["experiment_id"], fin["candidate_digest"], "retry"]))
             existing = db.execute("SELECT * FROM jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
             if existing:
-                if existing["payload_sha256"] != payload:
+                if existing["payload_sha256"] != payload or existing["job_id"] != fin["refit_job_id"]:
                     raise ConflictError("Idempotency key was used with a different payload")
                 return _record(existing)
+
+            prev_job = db.execute("SELECT * FROM jobs WHERE job_id=?", (fin["refit_job_id"],)).fetchone()
+            if (fin["state"] != "retryable_pre_evaluation" or prev_job is None
+                    or prev_job["kind"] != "finalization" or prev_job["experiment_id"] != fin["experiment_id"]
+                    or prev_job["state"] not in ("failed", "interrupted", "cancelled")):
+                raise ConflictError("Previous finalization is not a retryable terminal job")
+            if prev_job["attempt_id"] is None:
+                if prev_job["state"] != "cancelled" or prev_job["owner_token"] is not None:
+                    raise ConflictError("Previous child identity is unknown")
+            else:
+                proc = db.execute("SELECT child_pid,child_created FROM worker_processes WHERE attempt_id=?",
+                                  (prev_job["attempt_id"],)).fetchone()
+                if not proc or proc["child_pid"] is None or proc["child_created"] is None or \
+                        process_liveness(proc["child_pid"], proc["child_created"]) != "dead":
+                    raise ConflictError("Previous worker child must be verified dead before retry")
+
+            self._verify_finalization_selection(db, fin)
 
             job_id, now = str(uuid4()), _now()
             db.execute("""INSERT INTO jobs(job_id, experiment_id, kind, idempotency_key, payload_sha256, state, created_at, updated_at)
@@ -822,7 +851,27 @@ class JobRepository:
         logger.info("Finalization job retried: %s", result.job_id)
         return result
 
-    def start_evaluation(self, finalization_id: str, expected_digest: str) -> tuple[str, str]:
+    def _verify_finalization_selection(self, db: sqlite3.Connection, fin: sqlite3.Row) -> None:
+        candidate = db.execute("SELECT c.job_id,c.family,c.config_sha256,c.experiment_id,e.primary_metric,s.manifest_sha256 "
+                               "FROM candidates c JOIN experiments e ON e.experiment_id=c.experiment_id "
+                               "JOIN configurations cfg ON cfg.configuration_id=e.configuration_id "
+                               "JOIN splits s ON s.split_id=cfg.split_id WHERE c.candidate_id=? AND cfg.scope_id=?",
+                               (fin["candidate_id"], fin["scope_id"])).fetchone()
+        if candidate is None or candidate["experiment_id"] != fin["experiment_id"]:
+            raise ConflictError("Frozen candidate identity is unavailable")
+        from apps.api.services.finalization import compute_candidate_digest
+        bundle = self.read_published_results(candidate["job_id"])
+        data = next((c for c in bundle.get("candidates", []) if c.get("family") == candidate["family"]), None)
+        score = next((s.get("mean") for s in data.get("summary", [])
+                      if s.get("name") == candidate["primary_metric"]), None) if data else None
+        if (not data or not data.get("eligible") or score is None or
+                compute_candidate_digest(fin["candidate_id"], candidate["family"], candidate["manifest_sha256"],
+                                         candidate["config_sha256"], candidate["primary_metric"], score,
+                                         data.get("model_seed", 42)) != fin["candidate_digest"]):
+            raise ConflictError("Frozen selection no longer matches its evidence")
+
+    def start_evaluation(self, finalization_id: str, expected_digest: str, *,
+                         owner: WorkerIdentity, job_id: str, attempt_id: str) -> tuple[str, str]:
         _text(finalization_id)
         _text(expected_digest)
         with self._transaction() as db:
@@ -834,12 +883,26 @@ class JobRepository:
             if fin["candidate_digest"] != expected_digest:
                 raise ConflictError("Candidate digest mismatch")
 
+            if not isinstance(owner, WorkerIdentity) or fin["state"] != "refitting" or fin["refit_job_id"] != job_id:
+                raise ConflictError("Active finalization owner required")
+            job = self._owned_running_row(db, owner, job_id)
+            if (job["kind"] != "finalization" or job["attempt_id"] != attempt_id
+                    or job["experiment_id"] != fin["experiment_id"] or job["cancel_requested"]):
+                raise ConflictError("Attempt is not authorized to start evaluation")
+            proc = db.execute("SELECT child_pid,child_created FROM worker_processes WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if not proc or proc["child_pid"] is None or proc["child_created"] is None or \
+                    process_liveness(proc["child_pid"], proc["child_created"]) != "alive":
+                raise ConflictError("Active execution child identity required")
+            self._verify_finalization_selection(db, fin)
+
             token = secrets.token_hex(32)
             now = _now()
             db.execute(
-                "UPDATE finalizations SET state='evaluating', evaluation_started_at=?, updated_at=? WHERE finalization_id=?",
-                (now, now, finalization_id),
+                "UPDATE finalizations SET state='evaluating', attempt_id=?, evaluation_started_at=?, updated_at=? WHERE finalization_id=?",
+                (attempt_id, now, now, finalization_id),
             )
+            db.execute("INSERT INTO evaluation_authorizations(finalization_id,token_sha256) VALUES(?,?)",
+                       (finalization_id, _digest(token)))
             db.execute(
                 "INSERT INTO scope_lock_markers(scope_id, state) VALUES(?, 'consumed') "
                 "ON CONFLICT(scope_id) DO UPDATE SET state='consumed'",
@@ -854,20 +917,31 @@ class JobRepository:
             row = db.execute("SELECT * FROM finalizations WHERE scope_id=?", (scope_id,)).fetchone()
             return dict(row) if row is not None else None
 
-    def record_evaluation_result(self, finalization_id: str, state: str,
-                                 result_path: str | None = None, result_checksum: str | None = None) -> None:
-        _text(finalization_id)
-        if state not in ("evaluated", "locked_failed"):
-            raise ValueError("Invalid terminal evaluation state")
+    def consume_fixture_authorization(self, capability) -> dict:
+        """Atomically authorize the fixture evaluator; no holdout file is opened."""
+        from ml.contracts import HoldoutCapability
+        if not isinstance(capability, HoldoutCapability):
+            raise PermissionError("Holdout capability required")
         with self._transaction() as db:
+            fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (capability.finalization_id,)).fetchone()
+            if (fin is None or fin["scope_id"] != capability.scope_id or fin["state"] != "evaluating"
+                    or fin["candidate_digest"] != capability.candidate_digest or fin["refit_job_id"] != capability.job_id
+                    or fin["attempt_id"] != capability.attempt_id or fin["evaluation_started_at"] is None):
+                raise ConflictError("Capability does not match the active selection and attempt")
+            owner = WorkerIdentity(capability.owner_token, capability.owner_generation)
+            job = self._owned_running_row(db, owner, capability.job_id)
+            if job["attempt_id"] != capability.attempt_id or job["cancel_requested"]:
+                raise ConflictError("Capability owner is stale or cancelled")
+            auth = db.execute("SELECT token_sha256,used FROM evaluation_authorizations WHERE finalization_id=?",
+                              (capability.finalization_id,)).fetchone()
+            if not auth or auth["used"] or not secrets.compare_digest(auth["token_sha256"], _digest(capability._auth_token)):
+                raise ConflictError("Invalid or already consumed capability")
+            proc = db.execute("SELECT child_pid,child_created FROM worker_processes WHERE attempt_id=?", (capability.attempt_id,)).fetchone()
+            if not proc or proc["child_pid"] is None or proc["child_created"] is None or \
+                    process_liveness(proc["child_pid"], proc["child_created"]) != "alive":
+                raise ConflictError("Execution child identity is not live")
             now = _now()
-            db.execute(
-                "UPDATE finalizations SET state=?, result_path=?, result_checksum=?, updated_at=? WHERE finalization_id=?",
-                (state, result_path, result_checksum, now, finalization_id),
-            )
-            db.execute(
-                "UPDATE scope_lock_markers SET state='consumed' WHERE scope_id="
-                "(SELECT scope_id FROM finalizations WHERE finalization_id=?)",
-                (finalization_id,),
-            )
-            _audit(db, "service", finalization_id, f"evaluation_{state}")
+            db.execute("UPDATE evaluation_authorizations SET used=1 WHERE finalization_id=?", (capability.finalization_id,))
+            db.execute("UPDATE finalizations SET state='evaluated',updated_at=? WHERE finalization_id=?", (now, capability.finalization_id))
+            _audit(db, "fixture", capability.finalization_id, "evaluation_evaluated")
+            return dict(fin)

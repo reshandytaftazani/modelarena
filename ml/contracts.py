@@ -612,22 +612,27 @@ class FrozenSelection:
             raise ValueError("ResourceLimits required")
 
 
-_CAPABILITY_TOKEN_MIN_LEN = 32
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class HoldoutCapability:
+    finalization_id: str
     scope_id: str
-    holdout_path: str
+    candidate_digest: str
+    job_id: str
+    attempt_id: str
+    owner_token: str = field(repr=False)
+    owner_generation: int
     _auth_token: str = field(repr=False)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.scope_id, str) or not self.scope_id:
-            raise ValueError("Scope ID required")
-        if not isinstance(self.holdout_path, str) or not self.holdout_path:
-            raise ValueError("Holdout path required")
-        if not isinstance(self._auth_token, str) or len(self._auth_token) < _CAPABILITY_TOKEN_MIN_LEN:
-            raise PermissionError("HoldoutCapability cannot be instantiated without a valid authorization token")
+    def __init__(self, *args, **kwargs) -> None:
+        raise PermissionError("Capabilities are issued only by the evaluation gate")
+
+    @classmethod
+    def _issue(cls, **values):
+        """Internal transport only; the repository validates every use."""
+        obj = object.__new__(cls)
+        for name in cls.__dataclass_fields__:
+            object.__setattr__(obj, name, values[name])
+        return obj
 
 
 @dataclass(frozen=True, slots=True)

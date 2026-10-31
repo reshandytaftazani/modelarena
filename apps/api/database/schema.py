@@ -1,6 +1,14 @@
 """Application schema and additive worker-identity migration, applied explicitly."""
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+EVALUATION_AUTH_SQL = """
+CREATE TABLE IF NOT EXISTS evaluation_authorizations (
+    finalization_id TEXT PRIMARY KEY REFERENCES finalizations(finalization_id),
+    token_sha256 TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0,1))
+);
+"""
 
 WORKER_PRESENCE_SQL = """
 CREATE TABLE IF NOT EXISTS worker_presence (
@@ -190,4 +198,5 @@ SCHEMA_SQL += WORKER_PRESENCE_SQL
 SCHEMA_SQL += SCOPE_LOCK_MARKERS_SQL
 SCHEMA_SQL += SCOPE_TOMBSTONES_SQL
 SCHEMA_SQL += FINALIZATIONS_SQL
+SCHEMA_SQL += EVALUATION_AUTH_SQL
 SCHEMA_SQL += JOB_PROGRESS_SQL

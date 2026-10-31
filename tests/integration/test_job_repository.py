@@ -39,7 +39,7 @@ def test_metadata_and_jobs_survive_reopen_without_raw_records(setup):
     reopened = JobRepository(repo.path)
     assert reopened.get_job(job.job_id) == job
     with sqlite3.connect(repo.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert db.execute("SELECT count(*) FROM datasets").fetchone()[0] == 1
         saved = json.loads(db.execute("SELECT config_json FROM configurations").fetchone()[0])

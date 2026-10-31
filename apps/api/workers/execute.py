@@ -139,6 +139,7 @@ def child_main(
     cancel_event=None,
     start_event=None,
     classical_input=None,
+    fold_channel=None,
 ) -> None:
     """Run one workload and report a bounded result. Never returns data rows."""
     del job_id, attempt_id  # Identifiers are for supervisor logs only.
@@ -148,6 +149,11 @@ def child_main(
     checked = validate_options(workload, options)
     apply_thread_environment(compute_threads)
     try:
+        if workload == "classical":
+            # A spawned process has not performed any torch work yet. Inter-op
+            # can only be configured once and before parallel work starts.
+            import torch
+            torch.set_num_interop_threads(1)
         from threadpoolctl import threadpool_limits
 
         with threadpool_limits(limits=compute_threads, user_api="blas"), \
@@ -161,13 +167,30 @@ def child_main(
 
                 context, run = classical_input
                 _emit(queue, PROGRESS, stage="fitting")
+                mlp_interop_threads = None
+                fold_proof = None
+
+                def progress(family, fold, finished, total, fold_finished=False):
+                    nonlocal mlp_interop_threads, fold_proof
+                    if family == "mlp":
+                        if fold_channel is None:
+                            raise RuntimeError("MLP watchdog channel is required")
+                        # The child cannot enter a fold before the supervisor
+                        # arms the timer, or proceed to another without its ack.
+                        fold_channel.send((fold, fold_finished, fold_proof if fold_finished else None))
+                        ack_fold, ack_finished, proof = fold_channel.recv()
+                        if (ack_fold, ack_finished) != (fold, fold_finished) or not isinstance(proof, str):
+                            raise RuntimeError("Invalid watchdog acknowledgement")
+                        fold_proof = None if fold_finished else proof
+                        if not fold_finished:
+                            mlp_interop_threads = torch.get_num_interop_threads()
+                    _emit(queue, PROGRESS, stage="fitting", family=family, fold_index=fold,
+                          finished_units=finished, total_units=total, fold_finished=fold_finished)
                 try:
                     candidates = evaluate_classical_suite(
                         context, run, cancelled=cancel_event.is_set if cancel_event is not None else lambda: False,
                         include_mlp=True,
-                        on_progress=lambda family, fold, finished, total, fold_finished=False: _emit(
-                            queue, PROGRESS, stage="fitting", family=family, fold_index=fold,
-                            finished_units=finished, total_units=total, fold_finished=fold_finished),
+                        on_progress=progress,
                     )
                 except SuiteCancelled:
                     return
@@ -180,7 +203,8 @@ def child_main(
                                 "mean_fit_seconds": entry.mean_fit_seconds, "baseline_delta": entry.baseline_delta,
                                 "tied": entry.tied} for entry in comparison.ranked],
                     "unranked": [candidate.family for candidate in comparison.unranked],
-                }, "observed_threadpools": _pool_report(threadpool_info())}
+                }, "observed_threadpools": _pool_report(threadpool_info()),
+                    "mlp_interop_threads": mlp_interop_threads}
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:
