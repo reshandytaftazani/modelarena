@@ -2,11 +2,11 @@
 
 **Fair comparisons. Reproducible experiments. Honest evaluation.**
 
-![Status: Day 18 verified locally](https://img.shields.io/badge/status-day_18_verified_locally-16a34a?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
+![Status: Day 19 verified locally](https://img.shields.io/badge/status-day_19_verified_locally-16a34a?style=flat-square) ![Design: Local-first](https://img.shields.io/badge/design-local--first-2563eb?style=flat-square) ![Compute: CPU only](https://img.shields.io/badge/compute-CPU%20only-0f766e?style=flat-square)
 
 ModelArena is a local-first ML experimentation platform in development for students and developers working with tabular data. Its backend combines scikit-learn models and a small PyTorch neural network, with the goal of making the reasoning behind a trustworthy experiment as visible as its results.
 
-> **Current status: Day 18 refit verified locally.** Both-task MLP cross-validation, fold-local early stopping, loss-curve tracking, full-training refit and private internal artifacts have fixture-based verification. G1 and G2 passed locally; G3 and G4 remain pending. The finalization gate is tested with a fixture evaluator: the real holdout reader, production refit/finalization integration and one-time holdout scoring are not implemented. See [validation evidence](docs/VALIDATION.md#day-18-refit--module-level-fixture-verification-2026-10-31).
+> **Current status: Day 19 final evaluation and report generator verified locally.** One-time holdout execution, durable reservation gate, crash recovery/fencing, and self-contained offline report generator ZIP packages (HTML/JSON/inline-SVG) are implemented and verified locally. G1 and G2 passed locally; G3 and G4 remain pending. See [validation evidence](docs/VALIDATION.md#day-19b-acceptance--escaped-offline-report-generator-and-zip-packaging--2026-11-01).
 
 ## Why ModelArena
 
@@ -39,7 +39,7 @@ The baseline MLP uses two hidden layers (64 and 32 units) with ReLU, Adam, and B
 1. **Reserve the holdout.** Use a default 80/20 train/holdout split, stratified for binary classification, and keep analytical profiling on training data.
 2. **Compare on training data.** Prefer five CV folds; use a documented feasible reduction down to two or reject unsuitable data. Every learned transformation stays within the appropriate fitting partition.
 3. **Select by CV.** Compare complete candidates against the Dummy baseline using the chosen primary metric: F1 by default or AP for classification; RMSE by default or MAE for regression. Holdout results never determine leaderboard order.
-4. **Evaluate the frozen selection.** Refit on the full training partition before one final holdout evaluation. For the MLP, use `ceil(median(best epochs))` over all complete successful CV folds, bounded to 1–100, without a final early-stopping subset. The refit module is verified locally; connecting its frozen budget to the durable reservation and real holdout evaluation remains future work.
+4. **Evaluate the frozen selection.** Refit on the full training partition before one final holdout evaluation. For the MLP, use `ceil(median(best epochs))` over all complete successful CV folds, bounded to 1–100, without a final early-stopping subset. The refit module, durable plan binding, one-time holdout evaluation, and crash recovery boundaries are implemented and verified locally.
 
 The intended learning outcomes are practical: recognize leakage, interpret baselines and fold variance, understand neural-network training, distinguish model randomness from split variability, and explain what a final test score can support.
 
@@ -77,7 +77,7 @@ The Windows Python environment and CPU-only torch wheel have passed the Day 1 sm
 
 ## Development roadmap
 
-Verified delivery as of **2026-10-31**:
+Verified delivery as of **2026-11-01**:
 
 | Work package | Delivery state | Verification / commit evidence |
 |---|---|---|
@@ -100,13 +100,15 @@ Verified delivery as of **2026-10-31**:
 | Day 15 PyTorch CPU foundations | Verified locally | 468 tests passed, zero skips; bounded MLP architecture, task loss selection, deterministic CPU DataLoader (workers=0), train/eval modes, weighted epoch loss, detached state dict, finite-loss guard, and RunControl cancellation; see [validation evidence](docs/VALIDATION.md#day-15-core-acceptance--2026-10-31) |
 | Day 16 strict fold-local early stopping | Verified locally | 478 tests passed, zero skips; inner-fit preprocessor isolation, inner-validation early stopping (patience 10, min_delta 1e-6, max 100 epochs), best checkpoint restoration, zero outer-val/holdout leakage, spy row IDs, and deterministic seed replay; see [validation evidence](docs/VALIDATION.md#day-16-core-acceptance--2026-10-31) |
 | Day 17 both-task MLP CV and curves | Review accepted locally | Fold-local CV, sigmoid scoring, MLflow/manifest curves and supervised MLP fold watchdog verified; later safety remediation and regressions passed. See [validation evidence](docs/VALIDATION.md#day-1417-remediation-follow-up--local-suites-passed-2026-10-31) |
-| Day 18 full-training refit and internal artifacts | Verified locally at module level | 12 acceptance tests passed, zero skips; fresh classical/MLP refit, complete-fold epoch policy and private checksummed artifacts. Production finalization integration remains pending. See [validation evidence](docs/VALIDATION.md#day-18-refit--module-level-fixture-verification-2026-10-31) and [model cards](docs/MODEL_CARDS.md) |
-| G3 — MLP and resource evidence | In progress | Day 17–18 modules verified; real finalization, reproducibility, resource comparison and usability evidence pending |
+| Day 18 full-training refit and internal artifacts | Committed | 12 acceptance tests passed, zero skips; `c183294`; fresh classical/MLP refit, complete-fold epoch policy and private checksummed artifacts. See [validation evidence](docs/VALIDATION.md#day-18-refit--module-level-fixture-verification-2026-10-31) and [model cards](docs/MODEL_CARDS.md) |
+| Day 19a guarded final evaluation and crash recovery | Committed | 30 owning tests, 113 regression batch, 9 review tests passed, zero skips; `5b96a86`; one-time HoldoutCapability, durable plan binding, payload schema validation, worker mixed dispatch; see [validation evidence](docs/VALIDATION.md#day-19a-acceptance--final-evaluation-holdout-gate-and-crash-recovery--2026-11-01) |
+| Day 19b offline report generator and ZIP packaging | Committed | 11 unit tests, 15 API integration tests passed, zero skips; `c7241d3`; self-contained HTML/JSON/inline-SVG ZIP, HTML escaping, no raw rows/model binaries/external assets; see [validation evidence](docs/VALIDATION.md#day-19b-acceptance--escaped-offline-report-generator-and-zip-packaging--2026-11-01) |
+| G3 — MLP and resource evidence | In progress | Day 17–19 verified; reproducibility, resource comparison and usability evidence pending |
 | G4 — Usable local release | Not started | Acceptance pending |
 
-Classical and MLP CV results are tracked locally; refit and internal artifacts have module-level fixture coverage. **G1 and G2 have passed locally; G3–G4 remain pending.** The latest full unit/integration run before Day 18 passed 522 tests; after Day 18, the owning acceptance suite passed 12 tests and relevant regression runs passed 90 and 42 tests. No full post-Day-18 suite or named-dataset demo is claimed.
+Classical and MLP CV results are tracked locally; full-training refit, one-time holdout evaluation, crash fencing, and offline report packaging are committed and verified locally. **G1 and G2 have passed locally; G3–G4 remain pending.** Across Day 19 verification, the owning finalization suite passed 30 tests, the independent review passed 9 tests, the report generator unit suite passed 11 tests, and the API integration batch passed 26 tests.
 
-The refit plan currently freezes CV evidence and epochs **in process**. The existing durable reservation does not yet persist that evidence digest or epoch budget, so identical-budget retries across restarts are not yet guaranteed. Before a real holdout read, Day 19 must bind the plan to verified published CV evidence and the durable reservation, and enforce the one-time access boundary. Internal artifact verification handles are process-local; there is no model reload, external import, export or standalone inference feature.
+The refit plan durably binds CV evidence and epoch budgets to the finalization record; one-time evaluation is protected by single-use tokens and crash locking. Offline reports are generated strictly from persisted results and loss curves, without accessing holdout data or triggering refit. Day 20 reproducibility and seed interpretation remain scheduled next.
 
 ### Local backend entrypoints
 
