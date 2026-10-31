@@ -23,7 +23,9 @@ import numpy as np
 import torch
 from threadpoolctl import threadpool_limits
 
-from ml.contracts import CandidateResult, EpochLoss, FrozenSelection, TrainingContext
+from ml.contracts import (CandidateResult, EpochLoss, FoldResult, FrozenSelection,
+                          MetricBundle, MetricSummary, MetricValue, ResourceLimits,
+                          RunConfig, TaskType, TrainingContext)
 from ml.models.classical import make_classical, model_families
 from ml.models.mlp import create_dataloader, make_mlp
 from ml.preprocessing.factory import FoldPreprocessor
@@ -60,6 +62,70 @@ def _model_tag(model: object, preprocessor: FoldPreprocessor, plan: RefitPlan, r
                history: tuple[EpochLoss, ...], fit_seconds: float) -> bytes:
     payload = [id(model), id(preprocessor), asdict(plan), rows, [asdict(p) for p in history], fit_seconds]
     return hmac.new(_HANDLE_KEY, canonical_bytes(payload), hashlib.sha256).digest()
+
+
+def candidate_from_dict(d: dict) -> CandidateResult:
+    """Reconstruct a validated CandidateResult from a stored results payload."""
+    task = TaskType(d["task"]) if isinstance(d["task"], str) else d["task"]
+    run_cfg = None
+    if d.get("run_config"):
+        rc = dict(d["run_config"])
+        if "limits" in rc and isinstance(rc["limits"], dict):
+            rc["limits"] = ResourceLimits(**rc["limits"])
+        run_cfg = RunConfig(**rc)
+
+    folds = []
+    for f in d.get("folds", []):
+        metrics = None
+        if f.get("metrics") is not None:
+            m = f["metrics"]
+            m_task = TaskType(m["task"]) if isinstance(m["task"], str) else m["task"]
+            vals = tuple(MetricValue(v["name"], v["value"], v.get("reason")) for v in (m.get("metrics") or m.get("values", [])))
+            conf = tuple(tuple(row) for row in m["confusion_matrix"]) if m.get("confusion_matrix") is not None else None
+            metrics = MetricBundle(m_task, m["sample_count"], vals, conf)
+        curve = None
+        if f.get("loss_curve") is not None:
+            curve = tuple(EpochLoss(p["epoch"], p["train_loss"], p["val_loss"]) for p in f["loss_curve"])
+        folds.append(FoldResult(
+            fold_index=f["fold_index"],
+            validation_row_ids=tuple(f["validation_row_ids"]),
+            status=f["status"],
+            metrics=metrics,
+            fit_seconds=f["fit_seconds"],
+            score_seconds=f["score_seconds"],
+            error=f.get("error"),
+            best_epoch=f.get("best_epoch"),
+            epochs_trained=f.get("epochs_trained"),
+            stop_reason=f.get("stop_reason"),
+            inner_fit_row_count=f.get("inner_fit_row_count"),
+            loss_curve=curve,
+        ))
+
+    summary = tuple(
+        MetricSummary(
+            name=s["name"],
+            mean=s["mean"],
+            std=s.get("std"),
+            valid_folds=s["valid_folds"],
+            reason=s.get("reason"),
+        )
+        for s in d.get("summary", [])
+    )
+
+    expected = tuple(d.get("expected_fold_indices", [f.fold_index for f in folds]))
+    return CandidateResult(
+        task=task,
+        family=d["family"],
+        model_seed=d["model_seed"],
+        split_sha256=d["split_sha256"],
+        primary_metric=d["primary_metric"],
+        direction=d["direction"],
+        expected_fold_indices=expected,
+        folds=tuple(folds),
+        summary=summary,
+        total_seconds=d.get("total_seconds", 0.0),
+        run_config=run_cfg,
+    )
 
 
 def freeze_refit(context: TrainingContext, selection: FrozenSelection, candidate: CandidateResult) -> RefitPlan:

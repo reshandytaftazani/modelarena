@@ -187,7 +187,7 @@ class JobRepository:
     def _initialize(self) -> None:
         with self._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
                 raise ValueError("Unsupported metadata schema version")
             if version == SCHEMA_VERSION:
                 return
@@ -207,6 +207,13 @@ class JobRepository:
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version == 5:
                     db.execute(EVALUATION_AUTH_SQL)
+                    cols = {row[1] for row in db.execute("PRAGMA table_info(finalizations)").fetchall()}
+                    if "evidence_sha256" not in cols:
+                        db.execute("ALTER TABLE finalizations ADD COLUMN evidence_sha256 TEXT")
+                    if "epoch_budget" not in cols:
+                        db.execute("ALTER TABLE finalizations ADD COLUMN epoch_budget INTEGER")
+                    if "plan_json" not in cols:
+                        db.execute("ALTER TABLE finalizations ADD COLUMN plan_json TEXT")
                     db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version in (1, 2, 3, 4):
                     if version < 2:
@@ -482,12 +489,25 @@ class JobRepository:
                 if process_liveness(identity[f"{prefix}_pid"], identity[f"{prefix}_created"]) != "dead":
                     return False
             now = _now()
-            db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
-                       "WHERE job_id=?", (now, row["job_id"]))
-            db.execute("UPDATE finalizations SET state='retryable_pre_evaluation',updated_at=? "
-                       "WHERE refit_job_id=? AND evaluation_started_at IS NULL AND state='refitting'", (now, row["job_id"]))
-            db.execute("UPDATE finalizations SET state='locked_failed',updated_at=? "
-                       "WHERE refit_job_id=? AND evaluation_started_at IS NOT NULL AND state='evaluating'", (now, row["job_id"]))
+            if row["kind"] == "finalization":
+                fin = db.execute("SELECT * FROM finalizations WHERE refit_job_id=?", (row["job_id"],)).fetchone()
+                if fin and fin["evaluation_started_at"] is not None:
+                    recovered = not row["cancel_requested"] and self._try_recover_staged_final_bundle(db, fin, row["attempt_id"], now)
+                    if not recovered:
+                        db.execute("UPDATE finalizations SET state='locked_failed',updated_at=? "
+                                   "WHERE refit_job_id=? AND evaluation_started_at IS NOT NULL AND state='evaluating'", (now, row["job_id"]))
+                        db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
+                                   "WHERE job_id=?", (now, row["job_id"]))
+                        _audit(db, "recovery", fin["finalization_id"], "finalization_locked_failed")
+                elif fin:
+                    db.execute("UPDATE finalizations SET state='retryable_pre_evaluation',updated_at=? "
+                               "WHERE refit_job_id=? AND evaluation_started_at IS NULL AND state='refitting'", (now, row["job_id"]))
+                    db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
+                               "WHERE job_id=?", (now, row["job_id"]))
+                    _audit(db, "recovery", fin["finalization_id"], "finalization_interrupted_pre_evaluation")
+            else:
+                db.execute("UPDATE jobs SET state='interrupted',stage='interrupted',safe_error='owner_lost',updated_at=? "
+                           "WHERE job_id=?", (now, row["job_id"]))
             db.execute("UPDATE candidates SET status='interrupted' WHERE attempt_id=?", (row["attempt_id"],))
             db.execute("UPDATE worker_lease SET generation=generation+1,owner_token=NULL,active_job_id=NULL,heartbeat_at=?",
                        (now,))
@@ -580,6 +600,11 @@ class JobRepository:
                     raise ConflictError("Child death must be verified before releasing its slot")
             if row["cancel_requested"] and state == "completed":
                 state, stage, safe_error = "cancelled", "cancelled", "cancelled"
+            # CV/probe completion cannot publish a final result. Until a fenced
+            # final-bundle transaction exists, never report finalization success
+            # through this generic job transition, even with a CV publication.
+            if row["kind"] == "finalization" and state == "completed":
+                raise ConflictError("Finalization requires a dedicated result publication")
             if state == "completed" and publication is not None:
                 from ml.tracking.manifest import file_digest
                 folder = Path(publication["path"]).resolve()
@@ -662,15 +687,26 @@ class JobRepository:
             if scope is None:
                 raise NotFoundError("Evaluation scope not found")
 
+            # Serialize this lookup with deletion's tombstone write. A reserved
+            # deleted scope is locked too: its original selection is gone.
+            from apps.api.services.retention import find_tombstone
+            if find_tombstone(self, scope["canonical_sha256"], scope["target"], scope["task"], db=db) is not None:
+                raise ConflictError("Deleted holdout scope is locked")
+
             if db.execute("SELECT 1 FROM deletion_intents i JOIN datasets d ON d.dataset_id=i.dataset_id WHERE d.canonical_sha256=?",
                           (scope["canonical_sha256"],)).fetchone():
                 raise ConflictError("Dataset deletion is pending")
 
             marker = db.execute("SELECT state FROM scope_lock_markers WHERE scope_id=?", (scope_id,)).fetchone()
-            if marker and marker["state"] == "consumed":
-                raise ConflictError("Holdout already consumed")
-
             existing = db.execute("SELECT * FROM finalizations WHERE scope_id=?", (scope_id,)).fetchone()
+            if marker and marker["state"] == "consumed":
+                if not (existing is not None and existing["state"] == "evaluated"
+                        and existing["candidate_id"] == candidate_id and existing["candidate_digest"] == digest):
+                    raise ConflictError("Holdout already consumed")
+            if marker and existing is None:
+                # The marker proves a reservation existed but its selection is
+                # unavailable. Never reinterpret this as an unselected scope.
+                raise ConflictError("Holdout reservation identity is unavailable")
             if existing is not None:
                 if existing["candidate_id"] != candidate_id or existing["candidate_digest"] != digest:
                     raise ConflictError("Evaluation scope already has a reserved candidate")
@@ -687,7 +723,7 @@ class JobRepository:
                 score = next((s["mean"] for s in summary if s.get("name") == cand_row["primary_metric"]), 0.0)
                 run_dict = json.loads(cand_row["run_json"])
                 limits = ResourceLimits(**run_dict.get("limits", {}))
-                return FrozenSelection(
+                sel = FrozenSelection(
                     finalization_id=existing["finalization_id"],
                     scope_id=scope_id,
                     experiment_id=existing["experiment_id"],
@@ -704,6 +740,15 @@ class JobRepository:
                     resource_limits=limits,
                     created_at=existing["created_at"],
                 )
+                if "evidence_sha256" in existing.keys() and existing["evidence_sha256"] is not None:
+                    if cand_data.get("folds"):
+                        from ml.training.refit import candidate_from_dict, freeze_refit
+                        from apps.api.services.workflow import load_refit_experiment
+                        prep, _ = load_refit_experiment(self, existing["experiment_id"])
+                        plan = freeze_refit(prep.context, sel, candidate_from_dict(cand_data))
+                        if plan.evidence_sha256 != existing["evidence_sha256"] or plan.epoch_budget != existing["epoch_budget"]:
+                            raise ConflictError("Frozen selection no longer matches its evidence")
+                return sel
 
             cand_row = db.execute(
                 "SELECT c.*, e.primary_metric, e.direction, e.run_json, cfg.scope_id as cfg_scope_id, s.manifest_sha256 "
@@ -744,20 +789,9 @@ class JobRepository:
 
             finalization_id = str(uuid4())
             now = _now()
-            db.execute(
-                "INSERT INTO finalizations(finalization_id, scope_id, experiment_id, candidate_id, candidate_digest, state, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,'reserved',?,?)",
-                (finalization_id, scope_id, cand_row["experiment_id"], candidate_id, digest, now, now),
-            )
-            db.execute(
-                "INSERT INTO scope_lock_markers(scope_id, state) VALUES(?, 'reserved') ON CONFLICT(scope_id) DO NOTHING",
-                (scope_id,),
-            )
-            _audit(db, "service", finalization_id, "finalization_reserved")
-
             run_dict = json.loads(cand_row["run_json"])
             limits = ResourceLimits(**run_dict.get("limits", {}))
-            return FrozenSelection(
+            selection = FrozenSelection(
                 finalization_id=finalization_id,
                 scope_id=scope_id,
                 experiment_id=cand_row["experiment_id"],
@@ -775,6 +809,36 @@ class JobRepository:
                 created_at=now,
             )
 
+            from ml.tracking.manifest import canonical_bytes, digest_bytes
+            from ml.training.refit import candidate_from_dict, freeze_refit
+            evidence_sha256 = None
+            epoch_budget = None
+            plan_json = None
+            if cand_data.get("folds"):
+                candidate_result = candidate_from_dict(cand_data)
+                from apps.api.services.workflow import load_refit_experiment
+                prep, _ = load_refit_experiment(self, cand_row["experiment_id"])
+                plan = freeze_refit(prep.context, selection, candidate_result)
+                evidence_sha256 = plan.evidence_sha256
+                epoch_budget = plan.epoch_budget
+                plan_json = json.dumps(asdict(plan))
+            else:
+                evidence_sha256 = digest_bytes(canonical_bytes(cand_data))
+
+            db.execute(
+                "INSERT INTO finalizations(finalization_id, scope_id, experiment_id, candidate_id, "
+                "candidate_digest, state, evidence_sha256, epoch_budget, plan_json, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,'reserved',?,?,?,?,?)",
+                (finalization_id, scope_id, cand_row["experiment_id"], candidate_id, digest,
+                 evidence_sha256, epoch_budget, plan_json, now, now),
+            )
+            db.execute(
+                "INSERT INTO scope_lock_markers(scope_id, state) VALUES(?, 'reserved') ON CONFLICT(scope_id) DO NOTHING",
+                (scope_id,),
+            )
+            _audit(db, "service", finalization_id, "finalization_reserved")
+            return selection
+
     def enqueue_finalization(self, finalization_id: str, idempotency_key: str) -> JobRecord:
         _text(finalization_id)
         _text(idempotency_key)
@@ -782,6 +846,7 @@ class JobRepository:
             fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
             if fin is None:
                 raise NotFoundError("Finalization not found")
+            self._reject_finalization_deletion(db, fin)
             if fin["refit_job_id"] is not None:
                 existing_job = db.execute("SELECT * FROM jobs WHERE job_id=?", (fin["refit_job_id"],)).fetchone()
                 if existing_job:
@@ -812,6 +877,7 @@ class JobRepository:
             fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
             if fin is None:
                 raise NotFoundError("Finalization not found")
+            self._reject_finalization_deletion(db, fin)
 
             if fin["evaluation_started_at"] is not None or fin["state"] in ("evaluating", "evaluated", "locked_failed"):
                 raise ConflictError("Evaluation has already started or completed; holdout cannot be re-evaluated")
@@ -851,6 +917,16 @@ class JobRepository:
         logger.info("Finalization job retried: %s", result.job_id)
         return result
 
+    @staticmethod
+    def _reject_finalization_deletion(db: sqlite3.Connection, fin: sqlite3.Row) -> None:
+        """Serialize job creation with deletion of any canonically equivalent upload."""
+        if db.execute(
+            "SELECT 1 FROM evaluation_scopes s JOIN datasets d ON d.canonical_sha256=s.canonical_sha256 "
+            "JOIN deletion_intents i ON i.dataset_id=d.dataset_id WHERE s.scope_id=? LIMIT 1",
+            (fin["scope_id"],),
+        ).fetchone():
+            raise ConflictError("Dataset deletion is pending")
+
     def _verify_finalization_selection(self, db: sqlite3.Connection, fin: sqlite3.Row) -> None:
         candidate = db.execute("SELECT c.job_id,c.family,c.config_sha256,c.experiment_id,e.primary_metric,s.manifest_sha256 "
                                "FROM candidates c JOIN experiments e ON e.experiment_id=c.experiment_id "
@@ -869,6 +945,41 @@ class JobRepository:
                                          candidate["config_sha256"], candidate["primary_metric"], score,
                                          data.get("model_seed", 42)) != fin["candidate_digest"]):
             raise ConflictError("Frozen selection no longer matches its evidence")
+
+        if data.get("folds") and (fin["evidence_sha256"] is None or fin["plan_json"] is None):
+            raise ConflictError("Frozen refit evidence is unavailable")
+        if "evidence_sha256" in fin.keys() and fin["evidence_sha256"] is not None:
+            if data.get("folds"):
+                from ml.training.refit import candidate_from_dict, freeze_refit
+                from apps.api.services.workflow import load_refit_experiment
+                prep, _ = load_refit_experiment(self, fin["experiment_id"])
+                scope = db.execute("SELECT task FROM evaluation_scopes WHERE scope_id=?", (fin["scope_id"],)).fetchone()
+                exp = db.execute("SELECT primary_metric, direction, run_json FROM experiments WHERE experiment_id=?", (fin["experiment_id"],)).fetchone()
+                run_dict = json.loads(exp["run_json"])
+                limits = ResourceLimits(**run_dict.get("limits", {}))
+                sel = FrozenSelection(
+                    finalization_id=fin["finalization_id"], scope_id=fin["scope_id"],
+                    experiment_id=fin["experiment_id"], candidate_id=fin["candidate_id"],
+                    candidate_digest=fin["candidate_digest"], family=candidate["family"],
+                    task=TaskType(scope["task"]), primary_metric=exp["primary_metric"],
+                    primary_score=float(score), direction=exp["direction"],
+                    split_sha256=candidate["manifest_sha256"], config_sha256=candidate["config_sha256"],
+                    model_seed=data.get("model_seed", 42), resource_limits=limits,
+                    created_at=fin["created_at"],
+                )
+                plan = freeze_refit(prep.context, sel, candidate_from_dict(data))
+                if plan.evidence_sha256 != fin["evidence_sha256"] or plan.epoch_budget != fin["epoch_budget"]:
+                    raise ConflictError("Frozen selection no longer matches its evidence or budget")
+                try:
+                    stored_plan = json.loads(fin["plan_json"])
+                except (TypeError, ValueError):
+                    raise ConflictError("Frozen refit plan is invalid") from None
+                if stored_plan != json.loads(json.dumps(asdict(plan))):
+                    raise ConflictError("Frozen refit plan differs")
+            else:
+                from ml.tracking.manifest import canonical_bytes, digest_bytes
+                if digest_bytes(canonical_bytes(data)) != fin["evidence_sha256"]:
+                    raise ConflictError("Frozen selection evidence hash changed")
 
     def start_evaluation(self, finalization_id: str, expected_digest: str, *,
                          owner: WorkerIdentity, job_id: str, attempt_id: str) -> tuple[str, str]:
@@ -919,6 +1030,13 @@ class JobRepository:
 
     def consume_fixture_authorization(self, capability) -> dict:
         """Atomically authorize the fixture evaluator; no holdout file is opened."""
+        return self._consume_evaluation_authorization(capability, fixture=True)
+
+    def consume_holdout_authorization(self, capability) -> dict:
+        """Consume the active attempt's one read, without publishing a result."""
+        return self._consume_evaluation_authorization(capability, fixture=False)
+
+    def _consume_evaluation_authorization(self, capability, *, fixture: bool) -> dict:
         from ml.contracts import HoldoutCapability
         if not isinstance(capability, HoldoutCapability):
             raise PermissionError("Holdout capability required")
@@ -942,6 +1060,168 @@ class JobRepository:
                 raise ConflictError("Execution child identity is not live")
             now = _now()
             db.execute("UPDATE evaluation_authorizations SET used=1 WHERE finalization_id=?", (capability.finalization_id,))
-            db.execute("UPDATE finalizations SET state='evaluated',updated_at=? WHERE finalization_id=?", (now, capability.finalization_id))
-            _audit(db, "fixture", capability.finalization_id, "evaluation_evaluated")
+            if fixture:
+                db.execute("UPDATE finalizations SET state='evaluated',updated_at=? WHERE finalization_id=?", (now, capability.finalization_id))
+                _audit(db, "fixture", capability.finalization_id, "evaluation_evaluated")
+            else:
+                _audit(db, "worker", capability.finalization_id, "holdout_read_authorized")
             return dict(fin)
+
+    def publish_finalization(
+        self,
+        owner: WorkerIdentity,
+        job_id: str,
+        attempt_id: str,
+        finalization_id: str,
+        result_path: str,
+        result_checksum: str,
+        *,
+        telemetry: dict[str, object] | None = None,
+    ) -> JobRecord:
+        _text(job_id)
+        _text(attempt_id)
+        _text(finalization_id)
+        if not isinstance(result_path, str) or not result_path.strip():
+            raise ValueError("result_path must be a nonempty string")
+        _text(result_checksum)
+        if not isinstance(owner, WorkerIdentity):
+            raise TypeError("Valid WorkerIdentity required")
+        with self._transaction() as db:
+            lease = db.execute("SELECT * FROM worker_lease WHERE singleton=1").fetchone()
+            if (lease["owner_token"] != owner.owner_token or lease["generation"] != owner.generation
+                    or lease["active_job_id"] != job_id):
+                raise ConflictError("Worker lease is stale or not owned")
+
+            job = db.execute("SELECT * FROM jobs WHERE job_id=? AND attempt_id=?", (job_id, attempt_id)).fetchone()
+            if job is None or job["state"] != "running":
+                raise ConflictError("Job is not running for this attempt")
+
+            fin = db.execute("SELECT * FROM finalizations WHERE finalization_id=?", (finalization_id,)).fetchone()
+            if fin is None or fin["refit_job_id"] != job_id:
+                raise ConflictError("Finalization record not found or job mismatch")
+
+            if fin["state"] != "evaluating" or fin["evaluation_started_at"] is None or fin["attempt_id"] != attempt_id:
+                raise ConflictError("Finalization was not in evaluating state for this attempt")
+
+            if job["cancel_requested"]:
+                now = _now()
+                db.execute("UPDATE jobs SET state='cancelled',stage='cancelled',updated_at=? WHERE job_id=?", (now, job_id))
+                db.execute("UPDATE finalizations SET state='locked_failed',updated_at=? WHERE finalization_id=?", (now, finalization_id))
+                db.execute("UPDATE worker_lease SET owner_token=NULL,active_job_id=NULL WHERE singleton=1")
+                _audit(db, "worker", finalization_id, "finalization_cancelled_after_start_locked_failed")
+                return _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+
+            from ml.tracking.manifest import file_digest
+            folder = Path(result_path)
+            scope_dir = (self.path.parent / "final" / fin["scope_id"]).resolve()
+            if folder.is_symlink() or folder.resolve() != folder.absolute() or folder.absolute() != scope_dir / attempt_id:
+                raise ValueError("Invalid final bundle location")
+            manifest_file = folder / "manifest.json"
+            results_file = folder / "results.json"
+            if not manifest_file.exists() or not results_file.exists():
+                raise ValueError("Incomplete final result bundle")
+            if file_digest(manifest_file) != result_checksum:
+                raise ValueError("Final bundle manifest checksum mismatch")
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != 1 or manifest.get("origin") != "modelarena-final-v1":
+                raise ValueError("Invalid final bundle manifest metadata")
+            if file_digest(results_file) != manifest["artifact_sha256"]["results.json"]:
+                raise ValueError("Final bundle results checksum mismatch")
+            if (manifest.get("finalization_id") != finalization_id or manifest.get("attempt_id") != attempt_id
+                    or manifest.get("scope_id") != fin["scope_id"] or manifest.get("candidate_id") != fin["candidate_id"]):
+                raise ValueError("Final bundle metadata does not match finalization attempt")
+            try:
+                results_payload = json.loads(results_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError("Final bundle results payload is invalid JSON") from exc
+            from ml.evaluation.finalize import validate_final_result_payload
+            if not validate_final_result_payload(results_payload, fin):
+                raise ValueError("Final bundle results payload failed schema or identity validation")
+
+            now = _now()
+            db.execute("UPDATE finalizations SET state='evaluated',result_checksum=?,result_path=?,updated_at=? WHERE finalization_id=?",
+                       (result_checksum, str(folder), now, finalization_id))
+            db.execute("UPDATE jobs SET state='completed',stage='completed',updated_at=? WHERE job_id=?", (now, job_id))
+            db.execute("UPDATE scope_lock_markers SET state='consumed' WHERE scope_id=?", (fin["scope_id"],))
+            db.execute("UPDATE worker_lease SET owner_token=NULL,active_job_id=NULL,heartbeat_at=? WHERE singleton=1", (now,))
+            _audit(db, "worker", finalization_id, "finalization_evaluated")
+            _audit(db, "worker", job_id, "job_completed")
+            return _record(db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
+
+    def read_published_final_result(self, scope_id: str) -> dict:
+        """Read and verify the published final result for the evaluation scope."""
+        _text(scope_id)
+        from ml.tracking.manifest import file_digest
+        with self._connection() as db:
+            fin = db.execute("SELECT * FROM finalizations WHERE scope_id=? AND state='evaluated'", (scope_id,)).fetchone()
+        if fin is None or fin["result_path"] is None or fin["result_checksum"] is None:
+            raise NotFoundError("No published finalization result for this scope")
+        folder = Path(fin["result_path"]).resolve()
+        scope_dir = (self.path.parent / "final" / scope_id).resolve()
+        if folder.parent != scope_dir and folder != scope_dir / folder.name:
+            raise ValueError("Invalid final bundle location")
+        if folder.is_symlink():
+            raise ValueError("Unsafe bundle path")
+        manifest_file = folder / "manifest.json"
+        results_file = folder / "results.json"
+        if not manifest_file.exists() or not results_file.exists():
+            raise ValueError("Incomplete final result bundle")
+        if file_digest(manifest_file) != fin["result_checksum"]:
+            raise ValueError("Manifest checksum mismatch")
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        if file_digest(results_file) != manifest["artifact_sha256"]["results.json"]:
+            raise ValueError("Results checksum mismatch")
+        try:
+            results_payload = json.loads(results_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError("Final bundle results payload is invalid JSON") from exc
+        from ml.evaluation.finalize import validate_final_result_payload
+        if not validate_final_result_payload(results_payload, fin):
+            raise ValueError("Final bundle results payload failed schema or identity validation")
+        return results_payload
+
+    def _try_recover_staged_final_bundle(self, db: sqlite3.Connection, fin: sqlite3.Row, attempt_id: str, now: str) -> bool:
+        from ml.tracking.manifest import file_digest
+        scope_dir = (self.path.parent / "final" / fin["scope_id"]).resolve()
+        final_dir = scope_dir / attempt_id
+        staging_dir = scope_dir / ("staging-" + attempt_id)
+        candidate_dir = None
+        if final_dir.is_dir() and not final_dir.is_symlink():
+            candidate_dir = final_dir
+        elif staging_dir.is_dir() and not staging_dir.is_symlink():
+            candidate_dir = staging_dir
+        if candidate_dir is None:
+            return False
+        manifest_file = candidate_dir / "manifest.json"
+        results_file = candidate_dir / "results.json"
+        if not manifest_file.exists() or not results_file.exists():
+            return False
+        try:
+            manifest_sha = file_digest(manifest_file)
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != 1 or manifest.get("origin") != "modelarena-final-v1":
+                return False
+            if (manifest.get("finalization_id") != fin["finalization_id"] or manifest.get("attempt_id") != attempt_id
+                    or fin["attempt_id"] != attempt_id or manifest.get("scope_id") != fin["scope_id"]
+                    or manifest.get("candidate_id") != fin["candidate_id"]):
+                return False
+            if file_digest(results_file) != manifest.get("artifact_sha256", {}).get("results.json"):
+                return False
+            try:
+                results_payload = json.loads(results_file.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            from ml.evaluation.finalize import validate_final_result_payload
+            if not validate_final_result_payload(results_payload, fin):
+                return False
+            if candidate_dir == staging_dir:
+                staging_dir.rename(final_dir)
+                candidate_dir = final_dir
+            db.execute("UPDATE finalizations SET state='evaluated',result_checksum=?,result_path=?,updated_at=? WHERE finalization_id=?",
+                       (manifest_sha, str(candidate_dir), now, fin["finalization_id"]))
+            db.execute("UPDATE jobs SET state='completed',stage='completed',updated_at=? WHERE job_id=?", (now, fin["refit_job_id"]))
+            db.execute("UPDATE scope_lock_markers SET state='consumed' WHERE scope_id=?", (fin["scope_id"],))
+            _audit(db, "recovery", fin["finalization_id"], "finalization_recovered_and_published")
+            return True
+        except Exception:
+            return False

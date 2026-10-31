@@ -12,6 +12,7 @@ from typing import Any, Mapping
 #: Every stage the supervisor may persist. Ordered, lowercase, no free text.
 WORKER_STAGES = frozenset({
     "starting", "preparing", "fitting", "scoring", "finalizing",
+    "refitting", "evaluating",
     "completed", "failed", "cancelled", "interrupted",
 })
 
@@ -67,16 +68,31 @@ _PROBE_OPTIONS = (
     WorkloadOption("report_pools", bool, None, None),
 )
 
+_FINALIZATION_OPTIONS = (
+    WorkloadOption("crash_before_evaluation", int, 0, 127),
+    WorkloadOption("raise_before_evaluation", str, None, None),
+    WorkloadOption("crash_after_evaluation_start", int, 0, 127),
+    WorkloadOption("raise_after_evaluation_start", str, None, None),
+)
+
 #: Registry of executable workloads. A new entry needs its own validation and
 #: tests; nothing is resolved from a client-supplied path or import string.
 WORKLOADS: Mapping[str, tuple[WorkloadOption, ...]] = {
     "probe": _PROBE_OPTIONS,
-    "classical": (),
+    "classical": _FINALIZATION_OPTIONS,
+    "finalization": _FINALIZATION_OPTIONS,
 }
 
 PROBE_DEFAULTS: Mapping[str, Any] = {
     "work_seconds": 0.2, "steps": 2, "silent_seconds": 0.0, "allocate_mb": 0,
     "crash_exit_code": 0, "raise_message": "", "report_pools": False,
+}
+
+FINALIZATION_DEFAULTS: Mapping[str, Any] = {
+    "crash_before_evaluation": 0,
+    "raise_before_evaluation": "",
+    "crash_after_evaluation_start": 0,
+    "raise_after_evaluation_start": "",
 }
 
 
@@ -95,13 +111,17 @@ def validate_options(name: str, options: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(options) - set(declared)
     if unknown:
         raise ValueError("Unknown workload option")
-    merged = dict(PROBE_DEFAULTS) if name == "probe" else {}
+    merged = dict(PROBE_DEFAULTS) if name == "probe" else dict(FINALIZATION_DEFAULTS) if name in ("classical", "finalization") else {}
     merged.update(options)
     for key, option in declared.items():
         value = merged[key]
         if option.kind is bool:
             if type(value) is not bool:
                 raise ValueError(f"Option {key} must be boolean")
+            continue
+        if option.kind is str:
+            if not isinstance(value, str):
+                raise ValueError(f"Option {key} must be a string")
             continue
         if option.kind is int:
             if type(value) is not int:

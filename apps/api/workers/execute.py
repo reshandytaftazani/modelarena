@@ -140,6 +140,8 @@ def child_main(
     start_event=None,
     classical_input=None,
     fold_channel=None,
+    finalization_input=None,
+    evaluation_channel=None,
 ) -> None:
     """Run one workload and report a bounded result. Never returns data rows."""
     del job_id, attempt_id  # Identifiers are for supervisor logs only.
@@ -205,6 +207,76 @@ def child_main(
                     "unranked": [candidate.family for candidate in comparison.unranked],
                 }, "observed_threadpools": _pool_report(threadpool_info()),
                     "mlp_interop_threads": mlp_interop_threads}
+            elif workload == "finalization":
+                if evaluation_channel is None or finalization_input is None:
+                    raise RuntimeError("Finalization channel and input are required")
+                import torch
+                torch.set_num_interop_threads(1)
+                from dataclasses import asdict
+                from time import perf_counter
+                from apps.api.database.repository import JobRepository, _now
+                from ml.evaluation.finalize import read_holdout, score_holdout, stage_final_bundle
+                from ml.training.refit import refit_selected
+
+                context, plan, candidate_result, fin, db_path = finalization_input
+                cancel_check = cancel_event.is_set if cancel_event is not None else (lambda: False)
+                _emit(queue, PROGRESS, stage="refitting")
+                if checked.get("crash_before_evaluation"):
+                    os._exit(int(checked["crash_before_evaluation"]))
+                if checked.get("raise_before_evaluation"):
+                    raise RuntimeError(str(checked["raise_before_evaluation"]))
+                model = refit_selected(context, plan, candidate_result, control=cancel_check)
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                # Refit complete; request HoldoutCapability from supervisor
+                evaluation_channel.send(("ready_for_evaluation", plan.selection.candidate_digest))
+                msg = evaluation_channel.recv()
+                if not isinstance(msg, tuple) or msg[0] != "capability" or msg[1] is None:
+                    raise RuntimeError("Failed to receive holdout capability")
+                capability = msg[1]
+                _emit(queue, PROGRESS, stage="evaluating")
+                if checked.get("crash_after_evaluation_start"):
+                    os._exit(int(checked["crash_after_evaluation_start"]))
+                if checked.get("raise_after_evaluation_start"):
+                    raise RuntimeError(str(checked["raise_after_evaluation_start"]))
+                child_repo = JobRepository(db_path)
+                holdout_view = read_holdout(child_repo, capability)
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                eval_start = perf_counter()
+                task = plan.selection.task
+                bundle = score_holdout(model, holdout_view, task)
+                eval_seconds = perf_counter() - eval_start
+                now = _now()
+                result_payload = {
+                    "finalization_id": fin["finalization_id"],
+                    "scope_id": fin["scope_id"],
+                    "experiment_id": fin["experiment_id"],
+                    "candidate_id": fin["candidate_id"],
+                    "candidate_digest": fin["candidate_digest"],
+                    "task": task.value,
+                    "primary_metric": plan.selection.primary_metric,
+                    "primary_score": plan.selection.primary_score,
+                    "evaluation_seconds": eval_seconds,
+                    "evaluated_at": now,
+                    "metrics": asdict(bundle),
+                    "epoch_budget": plan.epoch_budget,
+                    "evidence_sha256": plan.evidence_sha256,
+                }
+                final_path, manifest_sha = stage_final_bundle(
+                    child_repo.path.parent, fin["finalization_id"], fin["scope_id"],
+                    capability.attempt_id, fin["candidate_id"], result_payload,
+                )
+                evaluation_channel.send(("staged", str(final_path), manifest_sha))
+                from threadpoolctl import threadpool_info
+                result = {
+                    "pid": os.getpid(),
+                    "workload": "finalization",
+                    "finalization_id": fin["finalization_id"],
+                    "result_path": str(final_path),
+                    "result_checksum": manifest_sha,
+                    "observed_threadpools": _pool_report(threadpool_info()),
+                }
             else:  # pragma: no cover - validate_options already rejected this
                 raise ValueError("Unknown workload")
     except Exception:

@@ -68,6 +68,15 @@ def create_experiment(repository: JobRepository, configuration_id: str, primary_
 
 def load_experiment(repository: JobRepository, experiment_id: str) -> tuple[PreparedExperiment, RunConfig]:
     """Rebuild the trusted training-only context using persisted source and folds."""
+    return _load_experiment(repository, experiment_id, training_partition=False)
+
+
+def load_refit_experiment(repository: JobRepository, experiment_id: str) -> tuple[PreparedExperiment, RunConfig]:
+    """Load frozen training input without opening source or held-out records."""
+    return _load_experiment(repository, experiment_id, training_partition=True)
+
+
+def _load_experiment(repository: JobRepository, experiment_id: str, *, training_partition: bool) -> tuple[PreparedExperiment, RunConfig]:
     with repository._connection() as db:
         row = db.execute("SELECT e.run_json,c.dataset_id,c.config_json,s.manifest_json "
                          "FROM experiments e JOIN configurations c ON c.configuration_id=e.configuration_id "
@@ -77,10 +86,14 @@ def load_experiment(repository: JobRepository, experiment_id: str) -> tuple[Prep
     raw_run = json.loads(row["run_json"])
     raw_run["limits"] = ResourceLimits(**raw_run["limits"])
     run = RunConfig(**raw_run)
-    data = load_dataset(repository, row["dataset_id"], run.limits)
     config = parse_config(json.loads(row["config_json"]))
     split = parse_manifest(row["manifest_json"].encode("utf-8"))
-    view = training_from_manifest(configure_dataset(data, config), split)
+    if training_partition:
+        from apps.api.services.partitions import load_training_partition
+        view = load_training_partition(repository, experiment_id, config, split, run.limits)
+    else:
+        data = load_dataset(repository, row["dataset_id"], run.limits)
+        view = training_from_manifest(configure_dataset(data, config), split)
     context = TrainingContext(view, split)
     prepared = PreparedExperiment(experiment_id, context, profile_training(view))
     repository.verify_classical_input(experiment_id, context, run)

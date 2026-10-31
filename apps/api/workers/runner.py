@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     repository = JobRepository(settings.metadata_path)
     worker = WorkerSupervisor(repository, limits=settings.limits, workload="classical",
-                              load_from_storage=True, owner_token=str(uuid4()))
+                              load_from_storage=True, claim_all=True, owner_token=str(uuid4()))
     try:
         with WorkerPresence(repository):
             while True:

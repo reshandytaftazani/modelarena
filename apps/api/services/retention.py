@@ -56,12 +56,15 @@ def _scope_hmac(key: bytes, canonical_sha256: str, target: str, task: str) -> st
     return hmac.new(key, encoded, hashlib.sha256).hexdigest()
 
 
-def find_tombstone(repository: JobRepository, canonical_sha256: str, target: str, task: str) -> str | None:
+def find_tombstone(repository: JobRepository, canonical_sha256: str, target: str, task: str, *, db=None) -> str | None:
     """Look up a deleted scope without storing its dataset or target identity."""
     key = _key(repository, create=False)
     if key is None:
         return None
     digest = _scope_hmac(key, canonical_sha256, target, task)
+    if db is not None:
+        row = db.execute("SELECT state FROM scope_tombstones WHERE scope_hmac=? AND version=1", (digest,)).fetchone()
+        return None if row is None else row[0]
     with repository._connection() as db:
         row = db.execute("SELECT state FROM scope_tombstones WHERE scope_hmac=? AND version=1", (digest,)).fetchone()
     return None if row is None else row[0]
@@ -149,15 +152,20 @@ def request_deletion(repository: JobRepository, dataset_id: str) -> dict:
         linked = list(db.execute("SELECT DISTINCT c.scope_id,c.split_id,e.experiment_id FROM configurations c "
                                  "LEFT JOIN experiments e ON e.configuration_id=c.configuration_id "
                                  "WHERE c.dataset_id=?", (dataset_id,)))
+        shared_scopes = [r[0] for r in db.execute(
+            "SELECT scope_id FROM evaluation_scopes WHERE canonical_sha256=?", (row[0],))]
     failed = False
     home = repository.path.parent
     try:
         _remove_file(home / "uploads" / dataset_id / "source.csv")
+        for scope_id in shared_scopes:
+            if str(UUID(scope_id)) != scope_id:
+                raise OSError("Unsafe linked identity")
+            _remove_directory(home / "datasets" / scope_id)
         for scope_id, split_id, experiment_id in linked:
             for value in (scope_id, split_id, experiment_id):
                 if value is not None and str(UUID(value)) != value:
                     raise OSError("Unsafe linked identity")
-            _remove_directory(home / "datasets" / scope_id)
             _remove_file(home / "splits" / (split_id + ".json"))
             _remove_directory(home / "final" / scope_id)
             if experiment_id is not None:

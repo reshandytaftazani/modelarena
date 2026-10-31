@@ -86,7 +86,8 @@ def get_finalization_status(repository: JobRepository, experiment_id: str) -> di
     """Return locked finalization state, selected candidate, and audit trail."""
     with repository._connection() as db:
         row = db.execute(
-            "SELECT c.scope_id, s.canonical_sha256, s.target, s.task "
+            "SELECT c.scope_id, s.canonical_sha256, s.target, s.task, "
+            "(SELECT state FROM scope_lock_markers WHERE scope_id=c.scope_id) AS marker_state "
             "FROM experiments e JOIN configurations c ON c.configuration_id=e.configuration_id "
             "JOIN evaluation_scopes s ON s.scope_id=c.scope_id WHERE e.experiment_id=?",
             (experiment_id,),
@@ -99,7 +100,8 @@ def get_finalization_status(repository: JobRepository, experiment_id: str) -> di
     fin = repository.get_finalization(scope_id)
 
     if fin is None:
-        state = "consumed" if tombstone == "consumed" else "unselected"
+        states = {tombstone, row["marker_state"]}
+        state = "consumed" if "consumed" in states else "reserved" if "reserved" in states else "unselected"
         return {
             "scope_id": scope_id,
             "state": state,
@@ -117,6 +119,13 @@ def get_finalization_status(repository: JobRepository, experiment_id: str) -> di
             (fin["finalization_id"],),
         ).fetchall()
 
+    result = None
+    if fin["state"] == "evaluated":
+        try:
+            result = repository.read_published_final_result(scope_id)
+        except Exception:
+            result = None
+
     return {
         "scope_id": scope_id,
         "state": fin["state"],
@@ -127,7 +136,7 @@ def get_finalization_status(repository: JobRepository, experiment_id: str) -> di
         "job_id": fin["refit_job_id"],
         "evaluation_started_at": fin["evaluation_started_at"],
         "audit": [{"occurred_at": e["occurred_at"], "actor": e["actor"], "event": e["event"]} for e in events],
-        "result": None,
+        "result": result,
     }
 
 

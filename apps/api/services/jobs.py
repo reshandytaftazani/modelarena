@@ -31,4 +31,6 @@ def prepare_experiment(repository: JobRepository, data: ValidatedDataset,
     profile = profile_training(context.training)
     make_classical(config.task, run.family, run.model_seed)
     experiment_id = repository.register_experiment(data, config, split, run, profile)
+    from apps.api.services.partitions import save_training_partition
+    save_training_partition(repository, experiment_id, data, split)
     return PreparedExperiment(experiment_id, context, profile)

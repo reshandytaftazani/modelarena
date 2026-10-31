@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS finalizations (
     evaluation_started_at TEXT,
     result_checksum TEXT,
     result_path TEXT,
+    evidence_sha256 TEXT,
+    epoch_budget INTEGER,
+    plan_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

@@ -118,6 +118,7 @@ class FinalizationResponse(BaseModel):
     direction: str
     created_at: str
     job_id: str | None = None
+    result: dict | None = None
 
 
 class FinalizationAuditEntry(BaseModel):
@@ -427,6 +428,12 @@ def create_app(repository: JobRepository, *, session_token: str,
             )
             with repository._connection() as db:
                 fin = db.execute("SELECT state FROM finalizations WHERE finalization_id=?", (selection.finalization_id,)).fetchone()
+            result = None
+            if fin and fin["state"] == "evaluated":
+                try:
+                    result = repository.read_published_final_result(selection.scope_id)
+                except Exception:
+                    result = None
             return FinalizationResponse(
                 finalization_id=selection.finalization_id,
                 scope_id=selection.scope_id,
@@ -439,6 +446,7 @@ def create_app(repository: JobRepository, *, session_token: str,
                 direction=selection.direction,
                 created_at=selection.created_at,
                 job_id=job.job_id if job else None,
+                result=result,
             )
         except ValueError as exc:
             if isinstance(exc, (ConflictError, CsvValidationError)):
